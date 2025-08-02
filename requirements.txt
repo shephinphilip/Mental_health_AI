@@ -1,0 +1,10 @@
+streamlit
+openai
+fpdf
+pymongo
+langchain 
+openai 
+faiss-cpu 
+tiktoken
+langchain-community
+python-docx
