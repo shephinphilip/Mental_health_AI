@@ -21,6 +21,8 @@ from depression_question_pool import question_pool
 from depression_scoring_guide import scoring_guides
 from welcome_questions import welcome_questions
 from dotenv import load_dotenv
+from functools import lru_cache
+from collections import defaultdict
 
 # Load environment variables
 load_dotenv()
@@ -31,7 +33,35 @@ MODEL = "gpt-4o-mini"
 # Initialize clients
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Document content (from provided document)
+
+
+# --- Critical items to front-load (safety first)
+CRITICAL_IDS = {"phq9_9", "kads_7", "cesd_9"}  # you can add more if needed
+
+# --- Minimal targets per category (rough #items that gives a stable estimate)
+CATEGORY_TARGETS = {
+    "depression": 9,  # PHQ-9 anchor
+    "anxiety": 7,     # GAD-7 anchor
+    "ptsd": 8,        # PCL-5 short set
+    "ocd": 10,        # OCI-R short probe
+    "bipolar": 7,     # MDQ core
+}
+
+# --- Core instruments per category (bonus to complete a clinically standard short form)
+CORE_ANCHORS = {
+    "depression": {"phq9", "kads11", "cesd", "mfqsf", "dass21"},  # any of these helps, PHQ-9 preferred
+    "anxiety": {"gad7", "hads", "scared", "scas", "rcads", "dass21", "dassy"},
+    "ptsd": {"pcl5", "iesr"},
+    "ocd": {"oci_r", "ybocs"},
+    "bipolar": {"mdq", "bsds"},
+}
+
+
+# --- Utility weights (tune these if you like)
+W_NEED      = 2.0   # how much we value covering under-sampled categories
+W_CORE      = 1.0   # bonus for core/anchor instruments
+W_NOVELTY   = 0.3   # small bonus for switching instruments (less fatigue/narrowing)
+W_DISCRIM   = 0.7   # prefer items in the top-2 categories when the margin is small
 
 
 def load_document_content(filename):
@@ -125,53 +155,146 @@ def call_openai(prompt: str) -> str:
             st.session_state.auth_error = True
             st.error(f"Authentication failed for OpenAI API: {e}. Please check your API key.")
         return ""
+    
+
+    
+def _instrument_key(qid: str, q: dict) -> str:
+    """Infer instrument family; uses explicit field if present, else id prefix."""
+    inst = (q.get("instrument") or "").strip().lower()
+    if inst:
+        return inst.replace(" ", "_").replace("-", "").replace("/", "_")
+    ql = qid.lower()
+    # common families
+    for fam in ["phq9","kads","gad7","hads","hama","scas","scared","rcads","pcl5","iesr",
+                "oci_r","ybocs","mdq","bsds","dass21","dassy","y_psc","ypsc","pdss","lsas"]:
+        if ql.startswith(fam):
+            return fam
+    return "misc"
+
+@lru_cache(maxsize=1)
+def _id_to_item():
+    return {q["id"]: q for q in question_pool}
+
+def _max_per_item(q):
+    sr = q.get("score_range") or []
+    return max(sr) if sr else 0
+    
+def _normalized_answer(qid: str, raw_score: int) -> float:
+    q = _id_to_item().get(qid)
+    if not q:
+        return 0.0
+    m = _max_per_item(q)
+    return (raw_score / m) if m > 0 else 0.0
+
+    
+def _category_stats(responses: Dict[str, int]):
+    """Compute per-category coverage and mean severity (0..1) from answered items."""
+    by_cat_sum = defaultdict(float)
+    by_cat_cnt = defaultdict(int)
+    by_inst_cnt = defaultdict(int)
+    asked_ids = set()
+
+    for qid, raw in responses.items():
+        q = _id_to_item().get(qid)
+        if not q:
+            continue
+        asked_ids.add(qid)
+        cat = q["category"]
+        by_cat_sum[cat] += _normalized_answer(qid, raw)
+        by_cat_cnt[cat] += 1
+        by_inst_cnt[_instrument_key(qid, q)] += 1
+
+    # mean severity + coverage ratio
+    mean = {c: (by_cat_sum[c] / by_cat_cnt[c]) if by_cat_cnt[c] else 0.0 for c in by_cat_cnt}
+    cov  = {c: (by_cat_cnt[c] / CATEGORY_TARGETS.get(c, 6)) for c in by_cat_cnt}
+    return asked_ids, mean, cov, by_inst_cnt    
+
+
+def _top_two_categories(mean: Dict[str, float]) -> Tuple[Optional[str], Optional[str], float]:
+    if not mean:
+        return None, None, 1.0
+    ranked = sorted(mean.items(), key=lambda kv: kv[1], reverse=True)
+    top = ranked[0][0]
+    second = ranked[1][0] if len(ranked) > 1 else None
+    margin = (ranked[0][1] - ranked[1][1]) if len(ranked) > 1 else ranked[0][1]
+    return top, second, margin
+
 
 def get_critical_question(responses: Dict[str, int]) -> Optional[Dict]:
-    critical_ids = ["phq9_9", "kads_7", "rcads_dep_9", "dass_dep_7", "cesd_9"]
-    for qid in critical_ids:
-        if qid not in responses:
-            return next((q for q in question_pool if q["id"] == qid), None)
+    """Ask critical/safety items ASAP if unanswered."""
+    asked = set(responses.keys())
+    for qid in CRITICAL_IDS:
+        if qid not in asked and qid in _id_to_item():
+            return _id_to_item()[qid]
     return None
 
 def get_next_question(responses: Dict[str, int]) -> Optional[Dict]:
-    """Use OpenAI to select the next question based on responses."""
-    if not responses:
-        # Start with a broad depression question
-        return next((q for q in question_pool if q["id"] == "phq9_1"), None)
+    """
+    Deterministic, explainable next-question selector:
+    1) Ask critical items first (suicidality etc.).
+    2) Compute per-category mean severity & coverage from answered items.
+    3) Score each remaining item by:
+       score = W_NEED*(1 - cat_cov) + W_CORE*core_bonus + W_NOVELTY*novelty + W_DISCRIM*discrim
+    4) Return argmax.
+    """
+    # 1) critical first
+    crit = get_critical_question(responses)
+    if crit:
+        return crit
 
-    # Prepare response summary (anonymized to avoid PII)
-    question_lookup = {q["id"]: q for q in question_pool}
-    response_summary = "\n".join([
-        f"Q: {question_lookup[qid]['category']} question (ID: {qid})\nA: Score {score}/{question_lookup[qid]['score_range'][-1]}"
-        for qid, score in responses.items() if qid in question_lookup
-    ])
+    # 2) stats from answered items
+    asked_ids, mean, cov, by_inst_cnt = _category_stats(responses)
+    top, second, margin = _top_two_categories(mean)
+    # uncertain when margin is small
+    uncertain = (margin < 0.20) if (top and second) else True
 
-    # List unanswered questions
-    available_questions = [
-        f"ID: {q['id']}, Category: {q['category']}, Text: {q['text']}"
-        for q in question_pool if q["id"] not in responses
-    ]
+    # most recent instrument to avoid long streaks
+    last_inst = None
+    if responses:
+        # pick the last answered qid in insertion order if dict preserves it; otherwise ignore
+        last_qid = next(reversed(responses.keys()))
+        last_q = _id_to_item().get(last_qid)
+        if last_q:
+            last_inst = _instrument_key(last_qid, last_q)
 
-    # Construct prompt for OpenAI
-    prompt = f"""
-You are a mental health assessment assistant. Below is a summary of answered questions from a mental health questionnaire, anonymized to protect privacy. Based on the responses, select the next most relevant question from the available questions that has not been answered. Prioritize questions that help narrow down to a primary diagnostic category (depression, anxiety, bipolar, OCD, PTSD) and assess severity or critical risks (e.g., self-harm). Return only the ID of the next question.
+    # 3) candidates & utility
+    best_q = None
+    best_u = float("-inf")
 
-Answered questions:
-{response_summary}
+    for q in question_pool:
+        qid = q["id"]
+        if qid in asked_ids:
+            continue
 
-Available questions:
-{available_questions}
+        cat = q["category"]
+        inst = _instrument_key(qid, q)
 
-Return: ID of the next question to ask.
-"""
-    response = call_openai(prompt)
-    try:
-        # Extract question ID (assuming model outputs "ID: <qid>")
-        next_qid = response.split("ID: ")[-1].strip().split("\n")[0]
-        return next((q for q in question_pool if q["id"] == next_qid), None)
-    except:
-        # Fallback to a random unanswered question
-        return next((q for q in question_pool if q["id"] not in responses), None)
+        # coverage need (prefer under-sampled categories)
+        cat_cov = cov.get(cat, 0.0)
+        need_term = (1.0 - min(1.0, cat_cov))  # 0..1
+
+        # core bonus if this instrument anchors the category
+        core_set = CORE_ANCHORS.get(cat, set())
+        core_bonus = 1.0 if any(inst.startswith(k) for k in core_set) else 0.0
+
+        # novelty if switching instruments
+        novelty = 1.0 if (last_inst and inst != last_inst) else 0.0
+
+        # discrimination bonus: when uncertain, prefer items from top-2; when certain, deepen top category
+        if uncertain:
+            discrim = 1.0 if (cat == top or cat == second) else 0.0
+        else:
+            discrim = 1.0 if (cat == top) else 0.0
+
+        utility = (W_NEED * need_term) + (W_CORE * core_bonus) + (W_NOVELTY * novelty) + (W_DISCRIM * discrim)
+
+        # small tie-breakers: prefer questions with bigger max score (more gradation), then by id
+        utility += 0.01 * _max_per_item(q)
+
+        if utility > best_u or (utility == best_u and qid < (best_q["id"] if best_q else "")):
+            best_q, best_u = q, utility
+
+    return best_q
 
 def compute_scores(responses: Dict[str, int]) -> Dict[str, int]:
     scores = {
@@ -180,7 +303,7 @@ def compute_scores(responses: Dict[str, int]) -> Dict[str, int]:
         "rcads_depression": 0,
         "dass21_depression": 0,
         "cesd": 0,
-        "mfq_sf": 0
+        "mfqsf": 0
     }
     for qid, score in responses.items():
         if qid.startswith("phq9_"):
@@ -194,7 +317,7 @@ def compute_scores(responses: Dict[str, int]) -> Dict[str, int]:
         elif qid.startswith("cesd_"):
             scores["cesd"] += score
         elif qid.startswith("mfqsf_"):
-            scores["mfq_sf"] += score
+            scores["mfqsf"] += score
         else:
             logging.warning(f"Unrecognized question ID: {qid}")
     scores["dass21_depression"] *= 2
@@ -384,35 +507,36 @@ def main():
                 st.warning("Please provide an answer to continue.")
 
     elif st.session_state.phase == "diagnostic":
-        # Ask diagnostic questions sequentially, no LLM-based adaptive logic
-        if st.session_state.diagnostic_index < len(question_pool) and st.session_state.diagnostic_index < MAX_DIAGNOSTIC_QUESTIONS:
-            q = question_pool[st.session_state.diagnostic_index]
+        # adaptive selection, no LLM
+        MAX_DIAGNOSTIC_QUESTIONS = 15  # keep your cap
 
-            st.write(f"Question {st.session_state.diagnostic_index + 1}: {q['text']}")
+        # Pick next question
+        next_q = get_next_question(st.session_state.responses)
 
-            answer = st.radio("Select an option:", q["options"], key=f"diag_{q['id']}")
-
-            if st.button("Next", key=f"diag_next_{q['id']}"):
-                if answer in q["options"]:
-                    answer_index = q["options"].index(answer)
-                    score = q["score_range"][answer_index]
-                    st.session_state.responses[q["id"]] = score
-                    st.session_state.diagnostic_index += 1
-
-                    # Optionally: check if depression threshold crossed early to finish early
-                    scores = compute_scores(st.session_state.responses)
-                    # Example threshold: PHQ9 >= 10 means probable depression
-                    if scores.get("phq9", 0) >= 10:
-                        st.session_state.phase = "results"
-                        st.rerun()
-                    else:
-                        st.rerun()
-                else:
-                    st.warning("Please select an option to continue.")
-        else:
-            # Max questions reached, move to results
+        # If done or cap reached -> results
+        if next_q is None or len([k for k in st.session_state.responses if k in _id_to_item()]) >= MAX_DIAGNOSTIC_QUESTIONS:
             st.session_state.phase = "results"
             st.rerun()
+
+        st.write(f"Question {len([k for k in st.session_state.responses if k in _id_to_item()]) + 1}: {next_q['text']}")
+        ans = st.radio("Select an option:", next_q["options"], key=f"diag_{next_q['id']}")
+
+        if st.button("Next", key=f"diag_next_{next_q['id']}"):
+            if ans in next_q["options"]:
+                idx = next_q["options"].index(ans)
+                raw_score = next_q["score_range"][idx]
+                st.session_state.responses[next_q["id"]] = raw_score
+
+                # Optional early-stop example: if PHQ-9 core suggests moderate+ early
+                # (use your own rules; this is just an example)
+                phq_sum = sum(v for k, v in st.session_state.responses.items() if k.startswith("phq9_"))
+                if phq_sum >= 10:
+                    st.session_state.phase = "results"
+                    st.rerun()
+                else:
+                    st.rerun()
+            else:
+                st.warning("Please select an option to continue.")
 
     elif st.session_state.phase == "results":
         if "vector_store" not in st.session_state:

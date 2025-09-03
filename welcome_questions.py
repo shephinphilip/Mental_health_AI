@@ -1,39 +1,73 @@
-# Define welcome questions separately
-welcome_questions = [
+# welcome_questions.py
+# ------------------------------------------------------------
+# Non-scored intake items shown before the adaptive assessment.
+# Keep these lightweight and unambiguous. The main app stores
+# answers in session state; these IDs intentionally do NOT match
+# any scored instrument prefixes (phq9_, gad7_, etc.).
+#
+# Types supported by the current UI:
+#   - "radio": uses q["options"]
+#   - "text" : free text (required by current UI flow)
+# ------------------------------------------------------------
+
+from typing import List, Dict, Any
+
+welcome_questions: List[Dict[str, Any]] = [
     {
-        "id": "welcome_1",
-        "text": "Before we vibe — what should we call you? Could be your name, your nickname, or your secret alter ego from the multiverse. Whatever feels comfy — this is your space.",
-        "type": "text",
-        "options": None
-    },
-    {
-        "id": "welcome_2",
-        "text": "If your brain was a playlist today, what would it be called? Think album titles like: 'Lo-Fi Overthinking'",
-        "type": "text",
-        "options": None
-    },
-    {
-        "id": "welcome_3",
-        "text": "Which emoji has been carrying your mental state lately? (Or just type yours. No wrong answer, promise.)",
-        "type": "text",
-        "options": None
-    },
-    {
-        "id": "welcome_4",
-        "text": "What’s one thing that kept you semi-sane this week? A meme that wrecked you (in a good way)? A song? A snack? Someone who actually texted back?",
-        "type": "text",
-        "options": None
-    },
-    {
-        "id": "welcome_5",
-        "text": "Be honest, how’s your sleep game lately?",
+        "id": "welcome_ack",
         "type": "radio",
-        "options": [
-            "Winning = full 8 hours",
-            "Lol what is sleep?",
-            "Sleep is my only bliss",
-            "Sleep but still tired"
-        ],
-        "score_range": [0, 1, 2, 3]  # for storage, not clinical scoring
-    }
+        "text": (
+            "This tool is a screening aid, not a diagnosis or emergency service. "
+            "If you or the child are in immediate danger, contact local emergency services. "
+            "Do you understand and want to continue?"
+        ),
+        "options": ["Yes, I understand and want to continue", "No"],
+    },
+    {
+        "id": "welcome_role",
+        "type": "radio",
+        "text": "Who is completing this assessment?",
+        "options": ["Child (age 8–17)", "Parent or caregiver", "Other adult"],
+    },
+    {
+        "id": "welcome_age_band",
+        "type": "radio",
+        "text": "What is the age of the child being assessed?",
+        "options": ["8–10", "11–13", "14–17"],
+    },
+    {
+        "id": "welcome_language",
+        "type": "radio",
+        "text": "Preferred language for questions:",
+        "options": ["English", "हिन्दी (Hindi)", "ಕನ್ನಡ (Kannada)"],
+    },
+    {
+        "id": "welcome_privacy",
+        "type": "radio",
+        "text": "Are you in a private space where you feel comfortable answering honestly?",
+        "options": ["Yes", "Mostly", "No"],
+    },
+    {
+        "id": "welcome_guardian_consent",
+        "type": "radio",
+        "text": (
+            "If you are a parent/caregiver, do you consent to the child participating in this screening?"
+        ),
+        "options": ["Yes", "No", "Not applicable"],
+    },
+    {
+        "id": "welcome_risk_gate",
+        "type": "radio",
+        "text": (
+            "Right now, are you (or the child) in immediate danger or having thoughts of self-harm? "
+            "If yes, please seek urgent help first via local emergency services before continuing."
+        ),
+        "options": ["No, we can continue", "Yes, I need help now"],
+    },
+    {
+        "id": "welcome_name",
+        "type": "text",
+        "text": "What name should we use to address you during this assessment?",
+        # no options for text; current UI treats text as required
+    },
 ]
