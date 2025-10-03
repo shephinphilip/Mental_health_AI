@@ -571,19 +571,51 @@ Severity: {severity}
 def main():
     st.title("Adolescent Mental Health Assessment")
 
-    # Session state is Streamlit’s way of remembering things between button clicks.
+    # --- API Key Setup ---
+    if "api_key" not in st.session_state:
+        st.session_state.api_key = None
+
+    if not st.session_state.api_key:
+        api_key_input = st.text_input(
+            "Enter your OpenAI API key",
+            type="password",
+            placeholder="sk-...",
+        )
+        if st.button("Save API Key"):
+            if api_key_input.startswith("sk-"):
+                st.session_state.api_key = api_key_input
+                st.success("API Key saved! You can now proceed.")
+                st.rerun()
+            else:
+                st.error("Please enter a valid OpenAI API key (starts with sk-).")
+        return  # stop execution until API key is provided
+
+    # Override client with user-provided key
+    global client
+    client = OpenAI(api_key=st.session_state.api_key)
+
+    # --- Configurable number of diagnostic questions ---
+    if "max_diag_qs" not in st.session_state:
+        st.session_state.max_diag_qs = 15  # default
+
+    st.sidebar.header("Settings")
+    st.session_state.max_diag_qs = st.sidebar.selectbox(
+        "Maximum Diagnostic Questions",
+        options=[5, 10, 15, 20, 25, 30],
+        index=2  # default = 15
+    )
+
+    # --- Session state initialization ---
     if "phase" not in st.session_state:
-        st.session_state.phase = "welcome"   # can be 'welcome' → 'diagnostic' → 'results'
+        st.session_state.phase = "welcome"
     if "welcome_index" not in st.session_state:
-        st.session_state.welcome_index = 0   # which welcome question we’re on
+        st.session_state.welcome_index = 0
     if "responses" not in st.session_state:
-        st.session_state.responses = {}      # stores both welcome (text) and diagnostic (numeric) answers
+        st.session_state.responses = {}
     if "diagnostic_index" not in st.session_state:
         st.session_state.diagnostic_index = 0
     if "scores" not in st.session_state:
         st.session_state.scores = None
-
-    MAX_DIAGNOSTIC_QUESTIONS = 15  # safety cap on length; adjust as desired
 
     # ----- Phase 1: Welcome / Intake (non-scored) -----
     if st.session_state.phase == "welcome":
@@ -616,7 +648,7 @@ def main():
         diag_answered = len([k for k in st.session_state.responses if k in _id_to_item()])
 
         # Stop if we hit the cap
-        if diag_answered >= MAX_DIAGNOSTIC_QUESTIONS:
+        if diag_answered >= st.session_state.max_diag_qs:
             st.session_state.phase = "results"
             st.rerun()
 
