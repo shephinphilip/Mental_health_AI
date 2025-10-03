@@ -49,7 +49,7 @@ load_dotenv()
 # selection engine does NOT use OpenAI or any other model.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = "gpt-4o-mini"
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = None
 
 # ===== Critical Safety Assessment Questions =====
 # These are ALWAYS asked first (if not already asked), because they screen for
@@ -116,92 +116,44 @@ logging.basicConfig(
 # ===== Vector store for RAG (report drafting only; optional) =====
 @st.cache_resource
 def setup_rag():
-    """
-    Build a small local search index over your guidance document to help the
-    report generator cite relevant advice. This does NOT affect question selection.
-    """
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
         length_function=lambda text: len(text)
     )
     documents = text_splitter.create_documents([DOCUMENT_CONTENT])
-    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+
+    api_key = st.session_state.get("api_key")
+    if not api_key:
+        st.error("No API key found. Please enter it.")
+        return None
+
+    embeddings = OpenAIEmbeddings(openai_api_key=api_key)
     vector_store = FAISS.from_documents(documents, embeddings)
     return vector_store
 
 
 # ===== OpenAI wrapper (only used for report generation) =====
 def call_openai(prompt: str) -> str:
-    """
-    Call OpenAI with robust error handling. This is NOT used by the question
-    selection engine. It is only used later to turn structured results into
-    narrative summaries for parents and kids.
-    """
+    api_key = st.session_state.get("api_key")
+    if not api_key:
+        st.error("No API key found. Please enter it.")
+        return ""
+
+    local_client = OpenAI(api_key=api_key)
+
     try:
-        response = client.chat.completions.create(
+        response = local_client.chat.completions.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000,
             temperature=0.7
         )
-        # Clean any previous error flags
-        st.session_state.pop("api_error", None)
-        st.session_state.pop("connection_error", None)
-        st.session_state.pop("rate_limit_error", None)
         return response.choices[0].message.content.strip()
-    except openai.APIError as e:
-        logging.error(f"OpenAI API returned an API Error: {e}")
-        if "api_error" not in st.session_state:
-            st.session_state.api_error = True
-            st.error(f"Error communicating with OpenAI API: {e}. Please try again later.")
+    except Exception as e:
+        st.error(f"Error with OpenAI API: {e}")
         return ""
-    except openai.APIConnectionError as e:
-        logging.warning(f"Connection error to OpenAI API: {e}. Retrying in 5 seconds...")
-        time.sleep(5)
-        try:
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=1000,
-                temperature=0.7
-            )
-            st.session_state.pop("connection_error", None)
-            return response.choices[0].message.content.strip()
-        except openai.APIConnectionError as e2:
-            logging.error(f"Failed to connect to OpenAI API after retry: {e2}")
-            if "connection_error" not in st.session_state:
-                st.session_state.connection_error = True
-                st.error(f"Unable to connect to OpenAI API: {e2}. Please check your internet connection and try again.")
-            return ""
-    except openai.RateLimitError as e:
-        max_retries = 3
-        for attempt in range(max_retries):
-            delay = 2 ** attempt
-            logging.warning(f"Rate limit error: {e}. Retrying in {delay} seconds (Attempt {attempt + 1}/{max_retries})")
-            time.sleep(delay)
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1000,
-                    temperature=0.7
-                )
-                st.session_state.pop("rate_limit_error", None)
-                return response.choices[0].message.content.strip()
-            except openai.RateLimitError:
-                continue
-        logging.error(f"OpenAI API request exceeded rate limit after {max_retries} retries: {e}")
-        if "rate_limit_error" not in st.session_state:
-            st.session_state.rate_limit_error = True
-            st.error(f"Rate limit exceeded for OpenAI API: {e}. Please wait a few minutes and try again.")
-        return ""
-    except openai.AuthenticationError as e:
-        logging.error(f"Authentication error with OpenAI API: {e}")
-        if "auth_error" not in st.session_state:
-            st.session_state.auth_error = True
-            st.error(f"Authentication failed for OpenAI API: {e}. Please check your API key.")
-        return ""
+
 
 
 # ======== DETERMINISTIC QUESTION SELECTION ENGINE (NO LLM) ========
@@ -446,8 +398,7 @@ def generate_final_conclusion(scores: Dict[str, int], vector_store) -> Tuple[str
       1) summarizes critical items,
       2) infers a primary category in a simple way,
       3) retrieves guidance text (RAG) to ground recommendations,
-      4) asks an LLM to draft readable text.
-    If you need a 100% model-free system, skip calling this and present only scores.
+      4) asks an LLM to draft readable text with supportive tone rules.
     """
     if vector_store is None:
         return "Error: Vector store not initialized.", "", None, None
@@ -462,7 +413,6 @@ def generate_final_conclusion(scores: Dict[str, int], vector_store) -> Tuple[str
     }
 
     # (2) Roughly pick a “primary” category to frame guidance.
-    #     (Here we look at the depression-related totals only; extend as needed.)
     severity_scores = {}
     for tool in scores:
         if tool in ["rcads_depression", "rcads_anxiety"]:
@@ -484,46 +434,79 @@ def generate_final_conclusion(scores: Dict[str, int], vector_store) -> Tuple[str
     score_key = category_to_score_key.get(primary_category, "phq9")
     severity = get_severity(scores.get(score_key, 0), score_key)
 
-    # (3) Retrieve guidance text related to {primary_category} and {severity}
+    # (3) Retrieve guidance text for RAG
     query = f"Guidelines for supporting adolescents with {primary_category} at {severity} severity."
     retriever = vector_store.as_retriever(search_kwargs={"k": 3})
     docs = retriever.invoke(query)
     context = "\n\n".join(doc.page_content for doc in docs)
 
-    # (4) Ask the LLM to draft two separate sections (parents + child)
+    # (4) Prompt template with severity tone rules
+    supportive_rules = """
+Tone rules by severity:
+- If severity is "none" or "minimal":
+   • Celebrate their positive state with encouragement and praise.
+   • Highlight strengths and habits they can continue.
+   • Keep tone light, friendly, motivational, affirmational.
+
+- If severity is "mild" or "moderate":
+   • Validate their feelings and normalize struggles.
+   • Acknowledge patterns from responses.
+   • Suggest 1–2 safe, simple coping tools (breathing, journaling, short activity).
+
+- If severity is "severe" or critical risk is flagged:
+   • Calmly emphasize safety as the first priority.
+   • Urge immediate help from a trusted adult and local crisis resources.
+   • Validate their courage and remind them they are not alone.
+   • Provide hopeful reassurance that things can improve.
+
+Always include Zenark’s Zen Mode mindfulness suggestion in every case.
+
+If crisis is true or critical items show self-harm/suicidal thoughts,
+add: “If you are in crisis or thinking about self-harm, please call the National Suicide Prevention Helpline at +91 9152987821 (if you're in India).”
+
+If worsening_two_weeks is true, advise gently that ongoing high scores mean it may be time to talk with a mental health professional.
+"""
+
     prompt_template = PromptTemplate(
         input_variables=["context", "critical_summary", "primary_category", "scores", "severity"],
-        template="""
-You are a licensed child psychiatrist preparing a clinical-style summary based on an assessment.
-Avoid giving direct diagnoses or alarming language. Use neutral, observational tone.
-Speak as if writing an assessment summary, not an email or advice column.
+        template=f"""
+You are a supportive AI helping adolescents and parents reflect on assessment results.
+NEVER diagnose or label a disorder. Use warm, age-appropriate language.
 
 --- Parents' Report ---
 Include:
-- Observational summary of the child's current emotional/behavioral patterns based on assessment responses.
-- Frame guidance as recommendations for creating a supportive environment, not commands.
-- Avoid stating "your child has depression" — instead use language like "patterns consistent with mood-related challenges".
-- Include when professional consultation *may* be beneficial without sounding urgent unless self-harm risk is flagged.
+- Observational summary of the child's current emotional/behavioral patterns.
+- Frame guidance as supportive recommendations, not commands.
+- Use phrasing like "patterns consistent with mood-related challenges" instead of clinical labels.
+- Include when professional consultation may be beneficial, without alarm unless self-harm risk is flagged.
 
 --- Child's Report ---
 Include:
-- Empathetic, age-appropriate message written in language suitable for an 8–15 year old.
-- Avoid clinical terms, focus on reassurance and normalization of feelings.
-- Encourage communication with trusted adults in gentle language.
+- Empathetic, age-appropriate message for ages 8–15.
+- Avoid clinical terms; focus on reassurance and normalization of feelings.
+- Encourage communication with trusted adults.
+- Always include Zenark’s Zen Mode mindfulness suggestion.
 
 Clinical Context:
-{context}
+{{context}}
 
 Critical Responses:
-{critical_summary}
+{{critical_summary}}
 
-Primary Category: {primary_category}
-Scores: {scores}
-Severity: {severity}
+Primary Category: {{primary_category}}
+Scores: {{scores}}
+Severity: {{severity}}
+
+{supportive_rules}
 """
     )
 
-    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7)
+    api_key = st.session_state.get("api_key")
+    if not api_key:
+        st.error("No API key available.")
+        return "", "", None, None
+
+    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7, openai_api_key=api_key)
     combine_docs_chain = create_stuff_documents_chain(llm, prompt_template)
     rag_chain = create_retrieval_chain(vector_store.as_retriever(search_kwargs={"k": 3}), combine_docs_chain)
 
@@ -538,7 +521,6 @@ Severity: {severity}
 
     full_text = result["answer"]
 
-    # Split the two sections by the marker we asked the model to use
     if "--- Child's Report ---" in full_text:
         parents_text, child_text = full_text.split("--- Child's Report ---", 1)
         parents_text = parents_text.replace("--- Parents' Report ---", "").strip()
@@ -546,7 +528,7 @@ Severity: {severity}
     else:
         parents_text, child_text = full_text, ""
 
-    # Render PDFs (simple black-on-white pages with paragraphs)
+    # Simple PDF generation
     def create_pdf(content: str) -> bytes:
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter)
@@ -581,14 +563,17 @@ def main():
             type="password",
             placeholder="sk-...",
         )
-        if st.button("Save API Key"):
-            if api_key_input.startswith("sk-"):
-                st.session_state.api_key = api_key_input
-                st.success("API Key saved! You can now proceed.")
-                st.rerun()
-            else:
-                st.error("Please enter a valid OpenAI API key (starts with sk-).")
-        return  # stop execution until API key is provided
+    if st.button("Save API Key"):
+        if api_key_input.startswith("sk-"):
+            st.session_state.api_key = api_key_input
+            global client
+            client = OpenAI(api_key=st.session_state.api_key)
+            st.success("API Key saved! You can now proceed.")
+            st.rerun()
+        else:
+            st.error("Please enter a valid OpenAI API key.")
+        return  # stop until key is entered
+
 
     # Override client with user-provided key
     global client
