@@ -9,3 +9,4 @@ tiktoken
 langchain-community
 python-docx
 reportlab
+langchain-openai
