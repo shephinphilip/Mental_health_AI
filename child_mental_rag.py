@@ -566,13 +566,14 @@ def main():
     if st.button("Save API Key"):
         if api_key_input.startswith("sk-"):
             st.session_state.api_key = api_key_input
-            global client
-            client = OpenAI(api_key=st.session_state.api_key)
+            # no need for "global client" here
+            globals()["client"] = OpenAI(api_key=st.session_state.api_key)
             st.success("API Key saved! You can now proceed.")
             st.rerun()
         else:
             st.error("Please enter a valid OpenAI API key.")
-        return  # stop until key is entered
+        return
+
 
 
     # Override client with user-provided key
