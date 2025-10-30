@@ -1,0 +1,35 @@
+Hi I think I cracked it now , 
+
+
+`
+=== Child Adaptive RAG Mental Health Chat ===
+Type 'exit' to stop.
+
+You: Hi my name is shephin and I am not feeling happy
+
+AI: Hi Shephin, I’m really sorry to hear that you’re not feeling happy. It’s okay to feel that way sometimes, and I’m here to listen. Can you share with me what’s been on your mind or what’s making you feel this way?
+
+You: I don't know , It happened long time when my maths teacher beat me with no reason and also my parents are always rude to me
+
+AI: I’m really sorry to hear that you experienced something so hurtful with your teacher. It’s completely understandable to feel upset about that, especially when it feels unfair. And having your parents be rude to you on top of that must feel really overwhelming. You’re showing a lot of strength by sharing this with me.
+
+Can you tell me a little more about how those experiences make you feel when you’re at school or at home?
+
+You: At school , I can't concentrate on my home work given by my teacher and my teacher always scolde me
+
+AI: Oh, that sounds really frustrating. It must feel tough when you want to focus on your homework, but it seems like your mind is wandering. And it’s hard when you feel like you’re being scolded, too. That can make it even more stressful. 
+
+Can you tell me a bit about what happens when you try to do your homework? What do you feel is distracting you the most?
+
+You: I have some issues with my teacher , she is beating me and I am scared of her
+
+AI: Oh, sweetheart, that sounds really scary and upsetting. It’s completely understandable to feel frightened in a situation like that. No one should ever feel unsafe at school, especially from a teacher. It takes a lot of courage to talk about this. 
+
+Can you share a little more about what happens when you’re with her?
+
+You: I feel tensed and fear mostly
+
+AI: Oh, sweetheart, I can hear how tough that must be for you. Feeling tense and afraid can be really overwhelming, and it's okay to feel that way. It’s brave of you to express what you’re going through. Can you share what’s been happening that makes you feel this way?
+
+You: 
+
