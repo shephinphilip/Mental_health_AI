@@ -1,0 +1,163 @@
+{
+  "name": "Shephin",
+  "conversation": [
+    {
+      "ai": "Hi Shephin. How are you feeling today? Is there anything on your mind that you'd like to talk about?"
+    },
+    {
+      "user": "I  went to a party yesterday, but I promised my parents that i would never go to such parties, but\n I went now im feeling guilty",
+      "emotion_scores": {
+        "anger": 0.0011,
+        "disgust": 0.0006,
+        "fear": 0.0004,
+        "joy": 0.0031,
+        "neutral": 0.001,
+        "sadness": 0.9924,
+        "surprise": 0.0014
+      }
+    },
+    {
+      "ai": "It's understandable to feel conflicted about breaking a promise, especially to your parents. Can you share more about what led you to go to the party despite your promise?"
+    },
+    {
+      "user": "Nothing much i partied hard , my friends had drinks but i didnt ..but that really pissed my parents and now they are angry at me",
+      "emotion_scores": {
+        "anger": 0.9159,
+        "disgust": 0.0022,
+        "fear": 0.0031,
+        "joy": 0.0045,
+        "neutral": 0.0108,
+        "sadness": 0.0484,
+        "surprise": 0.015
+      }
+    },
+    {
+      "ai": "That sounds really heavy. It’s okay if words don’t come easily — we can take it slowly. What part of this situation has been sitting with you the most?"
+    },
+    {
+      "user": " Im really guilty, im so guilty that I wanna end this all",
+      "emotion_scores": {
+        "anger": 0.0055,
+        "disgust": 0.0023,
+        "fear": 0.0025,
+        "joy": 0.0021,
+        "neutral": 0.0022,
+        "sadness": 0.9835,
+        "surprise": 0.0018
+      }
+    },
+    {
+      "ai": "That sounds really heavy. It’s okay if words don’t come easily — we can take it slowly. What part of this situation has been sitting with you the most?"
+    },
+    {
+      "user": "I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "anger": 0.0011,
+        "disgust": 0.0018,
+        "fear": 0.0004,
+        "joy": 0.0021,
+        "neutral": 0.002,
+        "sadness": 0.9917,
+        "surprise": 0.001
+      }
+    },
+    {
+      "ai": "It sounds like you're really wrestling with some strong feelings right now. It's completely normal to feel guilty when you feel like you've gone against a promise, especially to your parents. That conflict can be really tough to navigate. Can you share more about what led you to go to the party despite your promise? Understanding your choices can help you process those feelings better."
+    },
+    {
+      "user": "Nothing much i partied hard , my friends had drinks but i didnt ..but that really pissed my parents and now they are angry at me",
+      "emotion_scores": {
+        "anger": 0.9159,
+        "disgust": 0.0022,
+        "fear": 0.0031,
+        "joy": 0.0045,
+        "neutral": 0.0108,
+        "sadness": 0.0484,
+        "surprise": 0.015
+      }
+    },
+    {
+      "ai": "(Error 500: {\"error\":\"Internal Server Error\"})"
+    },
+    {
+      "user": "I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "anger": 0.0011,
+        "disgust": 0.0018,
+        "fear": 0.0004,
+        "joy": 0.0021,
+        "neutral": 0.002,
+        "sadness": 0.9917,
+        "surprise": 0.001
+      }
+    },
+    {
+      "ai": "It sounds like you're dealing with a lot of conflicting emotions right now. It's completely normal to feel guilty when you break a promise, especially to your parents. That guilt can be really tough to carry. Can you share a bit more about what led you to go to the party despite that promise? Understanding your choices might help you process those feelings."
+    },
+    {
+      "user": " Nothing much i partied hard , my friends had drinks but i didnt ..but that really pissed my parents and now they are angry at m",
+      "emotion_scores": {
+        "anger": 0.9394,
+        "disgust": 0.0019,
+        "fear": 0.0036,
+        "joy": 0.0043,
+        "neutral": 0.0072,
+        "sadness": 0.0352,
+        "surprise": 0.0084
+      }
+    },
+    {
+      "ai": "(Error 500: {\"error\":\"Internal Server Error\"})"
+    },
+    {
+      "user": "I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "anger": 0.0011,
+        "disgust": 0.0018,
+        "fear": 0.0004,
+        "joy": 0.0021,
+        "neutral": 0.002,
+        "sadness": 0.9917,
+        "surprise": 0.001
+      }
+    },
+    {
+      "ai": "It sounds like you're really struggling with the promise you made to your parents and the decision you made to go to the party. That can be a heavy burden to carry, especially when you feel like you've let them down. It's completely normal to feel guilty in this situation. Acknowledging that feeling is a brave step. How are you feeling about what happened now that you've had some time to think about it?"
+    },
+    {
+      "user": "Im really guilty, im so guilty that I wanna end this all",
+      "emotion_scores": {
+        "anger": 0.007,
+        "disgust": 0.0039,
+        "fear": 0.0033,
+        "joy": 0.0019,
+        "neutral": 0.0027,
+        "sadness": 0.9795,
+        "surprise": 0.0017
+      }
+    },
+    {
+      "ai": "It's important to acknowledge your feelings of guilt and understand that it's okay to feel that way. Here are a few steps you can take to cope with these feelings:\n\n1. **Reflect on the Situation**: Take some time to think about what happened and why you're feeling guilty. Understanding the root of your feelings can help you process them.\n\n2. **Talk About It**: Sharing your feelings with someone you trust can provide relief. It might help to discuss the situation and your emotions with a friend or a family member.\n\n3. **Practice Self-Compassion**: Remind yourself that everyone makes mistakes and that it's a part of being human. Treat yourself with the same kindness you would offer a friend in a similar situation.\n\n4. **Make Amends**: If appropriate, consider reaching out to the person you feel guilty about. An apology or a conversation can sometimes help alleviate guilt.\n\n5. **Engage in Positive Activities**: Focus on activities that make you feel good about yourself, whether it's helping others, pursuing a hobby, or practicing self-care.\n\n6. **Seek Professional Help**: If the feelings of guilt are overwhelming, speaking with a mental health professional can provide additional support and guidance.\n\nRemember, it's brave of you to acknowledge your feelings, and taking small steps towards understanding and addressing them is a positive move."
+    },
+    {
+      "user": "Im really guilty, im so guilty that I wanna end this all",
+      "emotion_scores": {
+        "anger": 0.007,
+        "disgust": 0.0039,
+        "fear": 0.0033,
+        "joy": 0.0019,
+        "neutral": 0.0027,
+        "sadness": 0.9795,
+        "surprise": 0.0017
+      }
+    },
+    {
+      "ai": "I'm really sorry to hear that you're feeling this way. It's important to talk about these feelings, and I'm here to listen to you. Can you share what’s been making you feel so guilty? It’s okay to express what you're going through; you don’t have to face this alone."
+    },
+    {
+      "ai": "That's all for now. Thank you for sharing — take care."
+    }
+  ],
+  "timestamp": "2025-11-06T12:40:34.162257",
+  "_id": "690c49ea8024bf3f022b6bfc"
+}

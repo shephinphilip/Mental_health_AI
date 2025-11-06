@@ -1,0 +1,103 @@
+{
+  "name": "Shephin",
+  "conversation": [
+    {
+      "ai": "Hi Shephin. How are you feeling today? Is there anything on your mind that you'd like to talk about?"
+    },
+    {
+      "user": " I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "(Engine error: One input key expected got ['question', 'chat_history'])"
+    },
+    {
+      "user": "I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "(Engine error: One input key expected got ['chat_history', 'question'])"
+    },
+    {
+      "user": "I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "It's understandable to feel guilty after going against a promise you made to your parents. It can be really tough to balance wanting to have fun with wanting to keep your family's trust. Can you tell me more about what led you to go to the party, and how you're feeling about it now?"
+    },
+    {
+      "user": "They might loose trust on me and never let me go to any other places alone and they will be ashamed of me",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "That sounds really heavy. It’s okay if words don’t come easily — we can take it slowly. What part of this situation has been sitting with you the most?"
+    },
+    {
+      "user": " Im really guilty, im so guilty that I wanna end this all",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "I'm sorry to hear that you're feeling this way. It's really important to talk to someone who can help you, like a mental health professional or a trusted person in your life. You don't have to go through this alone."
+    },
+    {
+      "user": "I don't have anyone to talk about this",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "I don't have feelings or personal experiences, so I don't need to talk to anyone about feelings. I'm here to provide information and assistance. If you have questions or need support, feel free to ask!"
+    },
+    {
+      "user": "I don't have anyone to talk about this",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "It's really tough to feel like you don't have anyone to talk to, especially when you're dealing with anxiety. I'm here to listen and support you. Can you share a little more about what's been on your mind?"
+    },
+    {
+      "user": "I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "That sounds really heavy. It’s okay if words don’t come easily — we can take it slowly. What part of this situation has been sitting with you the most?"
+    },
+    {
+      "user": "They might loose trust on me and never let me go to any other places alone and they will be ashamed of me",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "That sounds really heavy. It’s okay if words don’t come easily — we can take it slowly. What part of this situation has been sitting with you the most?"
+    },
+    {
+      "user": "I went to a party yesterday, but I promised my parents that i would never go to such parties, but I went now im feeling guilty",
+      "emotion_scores": {
+        "error": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "ai": "It's completely understandable to feel guilty after going against a promise you made to your parents. It shows that you care about their feelings and the commitments you've made. What do you think triggered your decision to attend the party despite your promise?"
+    },
+    {
+      "ai": "That's all for now. Thank you for sharing — take care."
+    }
+  ],
+  "timestamp": "2025-11-06T11:50:44.030640",
+  "_id": "690c3e3cda4c3bff22e5cebc"
+}
