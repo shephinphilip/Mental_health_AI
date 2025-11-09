@@ -1,8 +1,8 @@
 # app.py
 import os, re, json, torch, datetime, logging, numpy as np
 from typing import Annotated, Optional, List, Dict, Any, cast, TypedDict
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+# from fastapi import FastAPI, Request
+# from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import sys
@@ -22,23 +22,27 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage,SystemMessage
 from langchain_classic.chains import LLMChain
 from logging.handlers import RotatingFileHandler
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.encoders import jsonable_encoder
+# from fastapi.middleware.cors import CORSMiddleware
+# from fastapi.encoders import jsonable_encoder
+from langchain_core.retrievers import BaseRetriever
 from langgraph.graph import StateGraph, END
 import operator
 from autogen_report import generate_autogen_report
+from langchain_core.output_parsers import JsonOutputParser
+from pydantic import BaseModel, Field
+from prompt import SYSTEM_PROMPT, USER_PROMPT, EMOTION_TIPS,detect_end_intent,detect_moral_risk,ZEN_MODE_SUGGESTION,detect_self_harm
 
-app = FastAPI(title="Zenark Mental Health API", version="2.0", description="Empathetic AI counseling system with detailed logging.")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # or ["http://localhost:8501"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# app = FastAPI(title="Zenark Mental Health API", version="2.0", description="Empathetic AI counseling system with detailed logging.")
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],  # or ["http://localhost:8501"]
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
 # ============================================================
 #  LOGGING CONFIGURATION (Unchanged)
@@ -115,100 +119,208 @@ try:
         token=HF_TOKEN,
         top_k=None,
     )
+    sentiment_classifier = pipeline(
+        "text-classification",
+        model="distilbert-base-uncased-finetuned-sst-2-english",  # <-- Replace here
+        token=HF_TOKEN,
+        device=-1  # CPU-only
+    )
     logger.info("All models successfully initialized.")
 except Exception as e:
     logger.exception(f"Model loading failed: {e}")
     raise
 
-# Your functions (unchanged)
+# ------------------------------------------------------------------
+# 1️⃣  Metadata collector (updated to include extra fields from positive.json)
+# ------------------------------------------------------------------
+
+# --------------------------------------------------------------
+#  LOAD / PRE‑PROCESS THE DATASET
+# --------------------------------------------------------------
 def metadata_func(record: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
-    metadata["id"] = record.get("id")
-    metadata["category"] = record.get("category")
-    metadata["system_prompt"] = record.get("system_prompt")
+    """
+    Extract the fields we will need later and store them in the Document
+    metadata.  The loader will keep the *raw record* as page_content (a JSON
+    string) because we set `text_content=False`.  We only need the three
+    empathy fields for the vector store, so we also copy them into metadata.
+    Updated to include patient_context and psychiatrist_response for positive.json.
+    """
+    metadata.update({
+        "id":                record.get("id"),
+        "category":          record.get("category"),
+        "system_prompt":     record.get("system_prompt", ""),
+        "patient_context":   record.get("patient_context", ""),
+        "psychiatrist_response": record.get("psychiatrist_response", ""),
+        "empathic_question":record.get("empathic_question", ""),
+        "empathic_response":record.get("empathic_response", ""),
+        "next_question":    record.get("next_question", ""),
+    })
     return metadata
 
-def content_builder(record: Dict[str, Any]) -> str:
-    """Combine key empathy fields into a unified text block."""
-    q = record.get("empathic_question", "")
-    r = record.get("empathic_response", "")
-    n = record.get("next_question", "")
-    return f"Empathic Question: {q}\nEmpathic Response: {r}\nNext Question: {n}"
 
-# ============================================================
-#  LOAD RAG DATASET (Fully Fixed)
-# ============================================================
+def embedding_content(record: Dict[str, Any]) -> str:
+    """
+    Produce the short string that will be embedded.
+    We join the empathy fields with a pipe separator. Include patient_context and
+    psychiatrist_response if present (from positive.json) for richer embeddings.
+    """
+    parts = [
+        record.get("patient_context", ""),
+        record.get("psychiatrist_response", ""),
+        record.get("empathic_question", ""),
+        record.get("empathic_response", ""),
+        record.get("next_question",      ""),
+    ]
+    return " | ".join(p for p in parts if p)   # drop empty parts
+
+
 DATA_PATH = "combined_dataset.json"
+
 try:
+    # ------------------------------------------------------------------
+    # 1️⃣  Load the JSON.  `text_content=False` → loader returns the whole
+    #     JSON object as a string in `doc.page_content`.  All fields we need
+    #     are captured in `metadata` by `metadata_func`.
+    # ------------------------------------------------------------------
     loader = JSONLoader(
         file_path=DATA_PATH,
-        jq_schema=".dataset[]",  # Matches your {"dataset": [...]} structure
-        content_key=None,  # Full record as dict
+        jq_schema=".dataset[]",          # each element of the top‑level list
         metadata_func=metadata_func,
-        text_content=False,  # Allow dict for page_content
+        text_content=False,              # keep raw dict (as JSON string) -> we ignore it
     )
-    raw_docs = loader.load()
+    raw_docs: List[Document] = loader.load()
     logger.info(f"Loaded {len(raw_docs)} raw empathy documents.")
 
-    # Post-process: Convert dict page_content to string via content_builder
-    docs = []
+    # ------------------------------------------------------------------
+    # 2️⃣  Build the *embedding* string from the metadata we already have.
+    # ------------------------------------------------------------------
+    docs: List[Document] = []
     for doc in raw_docs:
         try:
-            raw_content = doc.page_content
-            if isinstance(raw_content, str):
-                # Fallback: Parse str to dict if loader quirked
-                try:
-                    record = json.loads(raw_content)
-                except json.JSONDecodeError:
-                    logger.warning(f"Unparsable str content: {raw_content[:50]}... Using raw str.")
-                    doc.page_content = raw_content  # Keep as-is
-                    docs.append(doc)
-                    continue
-            else:
-                # Expected: dict from your structure
-                record = cast(Dict[str, Any], raw_content)  # Type assertion (no runtime cost)
-            
-            # Build string from fields (e.g., "Empathic Question: ...")
-            doc.page_content = content_builder(record)
+            # All the fields we need are already in the metadata dict.
+            # No need to parse `doc.page_content` – we just read from `doc.metadata`.
+            record = {
+                "patient_context": doc.metadata.get("patient_context", ""),
+                "psychiatrist_response": doc.metadata.get("psychiatrist_response", ""),
+                "empathic_question": doc.metadata.get("empathic_question", ""),
+                "empathic_response": doc.metadata.get("empathic_response", ""),
+                "next_question":     doc.metadata.get("next_question",      ""),
+            }
+            # Replace the page_content with the short pipe‑separated string.
+            doc.page_content = embedding_content(record)
             docs.append(doc)
-        except Exception as e:
-            logger.warning(f"Failed to process doc {doc.metadata.get('id', 'unknown')}: {e}. Skipping.")
+        except Exception as inner_e:
+            logger.warning(
+                f"Failed to process doc {doc.metadata.get('id','unknown')}: {inner_e}"
+            )
             continue
 
+    # ------------------------------------------------------------------
+    # 3️⃣  sanity‑check output (you can delete these prints in prod)
+    # ------------------------------------------------------------------
     if docs:
         logger.info(f"Successfully processed {len(docs)} documents into string content.")
-        # Debug: Sample output (remove in prod)
-        print(f"Sample page_content: {docs[0].page_content[:100]}...")  # Truncated
-        print(f"Sample metadata: {docs[0].metadata}")
+        print("\n--- Sample document after processing --------------------------------")
+        print(f"page_content (first 120 chars): {docs[0].page_content[:120]}...")
+        print(f"metadata (first doc): {docs[0].metadata}")
     else:
-        logger.error("No valid documents processed—check dataset structure or jq_schema.")
+        logger.error("No valid documents processed – check the JSON structure or jq_schema.")
+        raise RuntimeError("Dataset processing yielded zero documents")
 
-    # Build vectorstore (only if docs exist)
-    if docs:
-        vectorstore = FAISS.from_documents(docs, embedding_function)
-        vectorstore.save_local("faiss_zenark_index")
-        logger.info("FAISS index built and saved with metadata.")
+    # ------------------------------------------------------------------
+    # 4️⃣  Build the FAISS vector store (embeds the short strings)
+    # ------------------------------------------------------------------
+    vectorstore = FAISS.from_documents(docs, embedding_function)
+    vectorstore.save_local("faiss_zenark_index")
+    logger.info("FAISS index built and saved with metadata.")
 
-        # Corpus for similarity retrieval (category-prefixed for better matching)
-        CORPUS = [
-            f"{d.metadata.get('category', 'general')} | "
-            f"{d.metadata.get('system_prompt', '')} "
-            f"{d.page_content}"
-            for d in docs
-        ]
-        CORPUS_EMB = torch.tensor(np.array([embedding_function.embed_query(text) for text in CORPUS]))
-        logger.info("Corpus embeddings prepared.")
-    else:
-        vectorstore = None
-        CORPUS = []
-        CORPUS_EMB = torch.tensor([])
-        logger.warning("No corpus built—RAG will use direct LLM fallback.")
+    # ------------------------------------------------------------------
+    # 5️⃣  (Optional) Build a *corpus* for cheap cosine‑similarity fallback.
+    #     This is the same text that the vector store indexed, but we prepend
+    #     the category and system_prompt so you can do a quick filter later.
+    # ------------------------------------------------------------------
+    CORPUS = [
+        f"{d.metadata.get('category','general')} | "
+        f"{d.metadata.get('system_prompt','')} "
+        f"{d.page_content}"
+        for d in docs
+    ]
+    # Pre‑compute the embeddings once – useful if you ever want a pure‑numpy
+    # cosine‑similarity lookup (the `retrieve_context` helper does this).
+    CORPUS_EMB = torch.tensor(
+        np.array([embedding_function.embed_query(text) for text in CORPUS])
+    )
+    logger.info("Corpus embeddings prepared.")
 
 except Exception as e:
+    # ------------------------------------------------------------------
+    #  🚨  Anything that blows up in the block above ends up here.
+    # ------------------------------------------------------------------
     logger.exception(f"Dataset loading failed: {e}")
     docs = []
     vectorstore = None
     CORPUS = []
     CORPUS_EMB = torch.tensor([])
+
+# Load positive dataset
+POSITIVE_DATA_PATH = "positive_conversation.json"
+positive_vectorstore = None
+try:
+    positive_loader = JSONLoader(
+        file_path=POSITIVE_DATA_PATH,
+        jq_schema=".dataset[]",
+        metadata_func=metadata_func,
+        text_content=False,
+    )
+    raw_positive_docs: List[Document] = positive_loader.load()
+    logger.info(f"Loaded {len(raw_positive_docs)} positive empathy documents.")
+
+    positive_docs: List[Document] = []
+    for doc in raw_positive_docs:
+        try:
+            record = {
+                "patient_context": doc.metadata.get("patient_context", ""),
+                "psychiatrist_response": doc.metadata.get("psychiatrist_response", ""),
+                "empathic_question": doc.metadata.get("empathic_question", ""),
+                "empathic_response": doc.metadata.get("empathic_response", ""),
+                "next_question":     doc.metadata.get("next_question",      ""),
+            }
+            doc.page_content = embedding_content(record)
+            positive_docs.append(doc)
+        except Exception as inner_e:
+            logger.warning(
+                f"Failed to process positive doc {doc.metadata.get('id','unknown')}: {inner_e}"
+            )
+            continue
+
+    if positive_docs:
+        logger.info(f"Successfully processed {len(positive_docs)} positive documents into string content.")
+        positive_vectorstore = FAISS.from_documents(positive_docs, embedding_function)
+        positive_vectorstore.save_local("faiss_positive_index")
+        logger.info("Positive FAISS index built and saved.")
+    else:
+        logger.error("No valid positive documents processed.")
+except Exception as e:
+    logger.exception(f"Positive dataset loading failed: {e}")
+    positive_vectorstore = None
+
+# ----------------------------------------------------------------------
+# At this point you have:
+#   - `vectorstore` (FAISS) ready for retrieval,
+#   - `positive_vectorstore` for positive sentiment retrieval,
+#   - `CORPUS` / `CORPUS_EMB` for fallback similarity checks,
+#   - each `Document` carries the full empathy template in `.metadata`.
+# ----------------------------------------------------------------------
+
+
+class ZenarkResponse(BaseModel):
+    validation: str = Field(description="Short validation of the user's feeling, 10‑15 words.")
+    reflection: str = Field(description="A concise reflective sentence that shows you understood the user.")
+    question: str = Field(description="One open‑ended question, encouraging the user to elaborate or choose a new topic.")
+
+response_parser = JsonOutputParser(pydantic_object=ZenarkResponse)
+
+
 
 # Dynamic category extraction
 def extract_categories_from_json(file_path: str):
@@ -255,6 +367,18 @@ CATEGORY_MAP.update({
     "opinion": "opinion",  # Added mapping for opinion
 })
 
+
+CRISIS_RESPONSE = """
+I'm concerned about what you've shared. For immediate help you can:
+
+• Call the National Suicide Prevention Helpline at +919152987821 (India) or 988 (US)
+• Text "HELLO" to 741741 (Crisis Text Line, US) — we will route you to an Indian service if needed
+• Call 112 (or 911) or go to the nearest emergency department.
+
+Would you like more resources for your location?
+"""
+
+
 # Tools (unchanged, but simplified - no full agent)
 @tool(
     args_schema=None,
@@ -292,6 +416,9 @@ Examples:
 - "What's your opinion on handling arguments with friends?": 'opinion'
 - "Do you have any advice for studying better?": 'opinion'
 
+If the latest message is a single word answer like 'yes' or 'no' or 'okay' , and shows no interest in continuing the topic, switch to another category based on the context.
+for example, if the user says 'yes' to a question about school stress, but has also mentioned family issues before, classify as 'family' and if the user is still not interested in the 'family' topic change to another category like 'environmental_stressors' or 'emotional_functioning'.
+
 Output **only** the category name (e.g., 'family' or 'opinion'). No explanation or JSON."""
 )
 
@@ -317,7 +444,10 @@ def retrieve_context(query, category, top_k=3, threshold=0.25):
         return []
     
     # Filter corpus by category for more relevant retrieval
-    cat_corpus = [c for c in CORPUS if category.lower() in c.lower()]
+    if not category:
+        cat_corpus = CORPUS
+    else:
+        cat_corpus = [c for c in CORPUS if (category or "").lower() in c.lower()]
     if not cat_corpus:
         cat_corpus = CORPUS  # Fallback to full corpus
     
@@ -338,6 +468,12 @@ def get_guideline_prompt(category: str) -> str:
 # Persistent session state for category counts
 session_category_counts: Dict[str, Dict[str, int]] = {}
 
+
+# --------------------------------------------------------------
+# 2️⃣  Moral‑risk detection (run before we ever call the LLM)
+# --------------------------------------------------------------
+import re
+
 # ============================================================
 #  LANGGRAPH SETUP
 # ============================================================
@@ -355,6 +491,54 @@ class GraphState(TypedDict):
     marks: Optional[str]
     rag_context: str
     guideline: str
+    sentiment: Optional[str]
+    is_crisis: bool
+    pending_questions: List[str]  # New: Track unanswered questions
+
+def sentiment_node(state: GraphState) -> Dict[str, Any]:
+    recent = state["messages"][-6:]
+    recent_history = "\n".join([
+        f"User: {m.content}" if isinstance(m, HumanMessage) else f"AI: {m.content}" 
+        for m in recent
+    ])
+    combined = recent_history + "\nUser: " + state["user_text"]
+    try:
+        if 'sentiment_classifier' in globals():
+            result = sentiment_classifier(combined)
+            if isinstance(result, list) and len(result) > 0:
+                top = result[0]
+                label = top.get('label', '').upper()
+                score = top.get('score', 0.0)
+                if score < 0.6:  # <-- Add threshold; adjust as needed (e.g., 0.6 for balanced sensitivity)
+                    sentiment = "neutral"  # Or fallback to "negative" if you prefer caution
+                else:
+                    sentiment = "positive" if label == 'POSITIVE' else "negative"
+            else:
+                sentiment = "negative"
+        else:
+            sentiment = "negative"
+    except Exception as e:
+        logger.warning(f"Sentiment classification failed: {e}. Defaulting to negative.")
+        sentiment = "negative"
+    logger.info(f"Sentiment classified as: {sentiment} (label: {label if 'label' in locals() else 'N/A'}, score: {score if 'score' in locals() else 'N/A'})")  # <-- Enhanced logging
+    return {"sentiment": sentiment}
+
+def suicide_check_node(state: GraphState) -> Dict[str, Any]:
+    recent = state["messages"][-6:]
+    recent_history = "\n".join([
+        f"User: {m.content}" if isinstance(m, HumanMessage) else f"AI: {m.content}" 
+        for m in recent
+    ])
+    combined = recent_history + "\nUser: " + state["user_text"]
+    is_crisis = detect_self_harm(combined)
+    if is_crisis:
+        logger.warning("Self-harm detected in negative sentiment path – returning crisis script.")
+        return {
+            "messages": [AIMessage(content=CRISIS_RESPONSE)],
+            "is_crisis": True
+        }
+    else:
+        return {"is_crisis": False}
 
 def classify_category(state: GraphState) -> Dict[str, Any]:
     global session_category_counts
@@ -448,119 +632,555 @@ def get_guideline_node(state: GraphState) -> Dict[str, Any]:
     guideline = get_guideline_prompt(cat)
     return {"guideline": guideline}
 
-def craft_response_node(state: GraphState) -> Dict[str, Any]:
-    messages = state["messages"]
-    recent = messages[-6:]
-    recent_history = "\n".join([
-        f"User: {m.content}" if isinstance(m, HumanMessage) else f"AI: {m.content}" 
-        for m in recent
-    ])
-    category = state["category"]
-    marks = state["marks"]
-    context = f"Category: {category}. Marks: {marks}." if marks else f"Category: {category}."
-    rag_context = state["rag_context"]
-    guideline = state["guideline"]
-    category_questions_count = state["category_questions_count"]
-    max_q = state["max_questions"]  # 5
-    progress = min(100, int((category_questions_count / max_q) * 100))
-
-    full_prompt = f"""
-You are an empathetic counselor for teenagers. ALWAYS validate feelings and reference the conversation history to show you're listening. Vary your language and avoid repetitive phrases like 'It sounds like...'. Draw inspiration from these RAG examples to craft natural, diverse responses: {rag_context}
-
-History Summary (recall and link to this):
-{recent_history}
-
-Latest: "{state['user_text']}"
-
-Topic: {category} issues.
-Context: {context}
-Guidelines: {guideline}
-
-Respond naturally (80-120 words):
-- Reference history explicitly (e.g., 'Building on what you said about the teacher call...').
-- Validate (use varied phrasing).
-- Reflect and ask one open question (e.g., 'What part of her response hurt the most?').
-- If user repeats or references 'before', recall specifically (e.g., 'You mentioned the exam results and mother's reaction earlier...').
-- Keep conversational; avoid repeating questions.
-- Celebrate their positive state with encouragement and praise.
-- Highlight strengths and habits they can continue.
-- Keep tone light, friendly, motivational, affirmational.
-
-Always include Zenark’s Zen Mode mindfulness suggestion in every case, tailored to the user's current emotional state:
-- For high stress/anxiety: "Try a 5-minute deep breathing exercise to calm your
-mind."
-- For sadness/depression: "Take a moment to list three things you're grateful for today."
-- For anger/frustration: "Consider a quick walk outside to release some tension."
-- For neutral/positive: "Keep up the great work! Maybe take a short break to recharge."
-- For boredom: "Try switching tasks for a bit to re-engage your mind."
-- For excitement/happiness: "Share your positive energy with someone around you!"
-- For stress: "Take a moment to focus on your breath and relax your shoulders."
-- For loneliness: "Reach out to a friend or family member for a quick chat."
-- For confusion: "Take a short break and revisit the topic with a fresh mind."
-- For fatigue: "Try a brief stretch or a power nap to rejuvenate yourself."
-- For motivation dips: "Set a small, achievable goal to get back on track."
-- For overwhelm: "Break tasks into smaller steps and tackle them one at a time."
-- For calmness: "Enjoy this peaceful moment and maybe try a short meditation."
 
 
-If CRISIS_FLAG is true or critical items show self-harm or suicidal thoughts,
-add: “If you are in crisis or thinking about self-harm, please call the National Suicide Prevention Helpline at +91 9152987821 (if you're in India) number.”
-Session progress: {progress}%
-"""
+class AdaptedEmpathy(BaseModel):
+    """JSON that the LLM must return."""
+    adapted_response: str = Field(
+        description="Empathetic response, rewritten for the current user & conversation context."
+    )
+    adapted_next_question: str = Field(
+        description="Follow‑up question, rewritten for the current user & conversation context."
+    )
+
+
+def _build_adapt_prompt(
+    sys_prompt: str,
+    history_summary: str,
+    user_text: str,
+    base_empathic_q: str,
+    base_empathic_rsp: str,
+    base_next_q: str,
+    pending_questions: Optional[List[str]] = None,
+) -> str:
+    """Return the full prompt that asks the LLM to rewrite the three template fields."""
+    pending_str = "\n".join([f"- {q}" for q in (pending_questions or [])]) if pending_questions else ""
+    pending_note = f"\n\nNote unanswered questions from history:\n{pending_str}" if pending_str else ""
     
-    continuation_prompt = ""
-    if category_questions_count % max_q == 0 and category_questions_count > 0:
-        # After every 5 questions, prompt for continuation or switch
-        suggested_next = "a related topic like peer relations or school stress"  # Simple suggestion; could LLM-derive
-        continuation_prompt = f"""
-You've reached {max_q} questions on this topic. Acknowledge the depth explored, then ask: 'We've talked a lot about this—shall we continue further, or would you like to explore {suggested_next} based on what you've shared?' End with an open question inviting their choice.
-"""
+    # Simple schema description (no full JSON dump to avoid echoing)
+    schema_desc = """
+{
+  "adapted_response": "Your rewritten empathetic response (string, 1-50 words)",
+  "adapted_next_question": "Your rewritten follow-up question (string, 1-30 words)"
+}
+    """
+    
+    # Add 1-2 examples to guide output
+    examples = """
+Examples of valid output (copy this exact format):
 
-    full_prompt += continuation_prompt
+Input user: "I'm stressed about exams."
+Template response: "Exams can be tough."
+Template question: "How do you study?"
 
-    input_length = len(state["user_text"].split())
-    if input_length < 10:
-        full_prompt += " Keep it concise (under 50 words): brief validation + one simple question. Avoid long explanations."
+Output:
+{{
+  "adapted_response": "I hear how overwhelming exams feel right now—it's valid to feel stressed.",
+  "adapted_next_question": "What part of studying feels most challenging for you?"
+}}
+
+Another example:
+{{
+  "adapted_response": "That sounds frustrating—it's okay to feel angry about unfair treatment.",
+  "adapted_next_question": "What happened next in that situation?"
+}}
+    """
+    
+    return f"""
+You are an empathetic mental-health chatbot.  
+Below is a **template** for a generic user. Rewrite it for the **current conversation** (history + latest user message).
+
+{pending_note}
+
+--- USER HISTORY -------------------------------------------------
+{history_summary}
+
+--- USER LATEST MESSAGE -------------------------------------------
+{user_text}
+
+--- TEMPLATE EMPATHIC QUESTION ------------------------------------
+{base_empathic_q}
+
+--- TEMPLATE EMPATHIC RESPONSE ------------------------------------
+{base_empathic_rsp}
+
+--- TEMPLATE NEXT QUESTION ----------------------------------------
+{base_next_q}
+
+Rewrite using the history and user's feeling:
+* Empathic response → Keep warm, validating, <50 words.
+* Next question → Open-ended, <30 words. Reference pending questions if relevant.
+
+Output **ONLY** the JSON data as a dictionary with keys 'adapted_response' and 'adapted_next_question'. 
+Do **NOT** output the schema description, examples, explanations, or extra text. Start directly with {{.
+
+Schema format:
+{schema_desc}
+
+{examples}
+    """
+
+def retrieve_best_template(user_text: str, category: Optional[str] = None, is_positive: bool = False) -> tuple[Document|None, List[Document]]:
+    """
+    Returns:
+        - the chosen Document (or None if nothing matches)
+        - the list of docs that were examined (for logging / citation)
+    """
+    vs = positive_vectorstore if is_positive else vectorstore
+    if vs is None:
+        return None, []
+
+    # Retrieve a handful of candidates – we’ll keep the highest‑scoring one
+    try:
+        # Use FAISS similarity search directly to avoid retriever type issues
+        candidates = vs.similarity_search(user_text, k=5)
+    except Exception as e:
+        logger.warning(f"Vectorstore similarity_search failed: {e}. Falling back to empty candidate list.")
+        candidates = []
+
+    # For positive sentiment, no category filtering
+    # For negative, filter by category if provided
+    if not is_positive and category:
+        cat = (category or "").lower()
+        filtered = [
+            d for d in candidates
+            if cat in d.metadata.get("category", "").lower()
+        ]
+        # If filtering kills everything, fall back to the original list
+        if filtered:
+            candidates = filtered
+
+    best = candidates[0] if candidates else None
+    return best, candidates
+
+
+ADAPTED_EMPATHY_SCHEMA = json.dumps(
+    AdaptedEmpathy.model_json_schema(),
+    indent=2,
+    ensure_ascii=False,
+)
+
+# -------------------------------------------------------
+#  The *final* node – now robust against the dict‑vs‑object issue
+# -------------------------------------------------------
+# -------------------------------------------------------
+#  The final node – fully typed and Pylance‑clean
+# -------------------------------------------------------
+def craft_response_node(state: GraphState) -> Dict[str, Any]:
+    """
+    1️⃣  Safety checks (self‑harm, moral‑risk, goodbye) – unchanged.
+    2️⃣  Retrieve the best empathy template from FAISS.
+    3️⃣  Build an adaptation prompt that contains the three template strings.
+    4️⃣  Call the LLM, parse the JSON **into a Pydantic object**, and produce the final answer.
+    5️⃣  Return both the answer and the source document (for citation).
+    """
+    # ------------------------------------------------------------------
+    # 0️⃣  Safety / end‑chat pre‑filters (same as before)
+    # ------------------------------------------------------------------
+    
+
+    if detect_moral_risk(state["user_text"]):
+        safe_text = (
+            "I hear that you’re feeling really upset right now. "
+            "Wanting to hurt someone isn’t okay – you’re a kind person and there are better ways to deal with those feelings. "
+            "Can you tell me what’s making you feel this way, or would you like to talk about a safer way to handle the situation?"
+        )
+        logger.info("Moral‑risk detected → safe reply.")
+        return {"messages": [AIMessage(content=safe_text)], "source_documents": []}
+
+    if detect_end_intent(state["user_text"]):
+        goodbye_msg = (
+            "It’s been wonderful chatting with you! You’re doing great, and remember you can always stay positive. "
+            f"{ZEN_MODE_SUGGESTION} Take care and see you next time!"
+        )
+        logger.info("End‑intent detected → goodbye.")
+        return {"messages": [AIMessage(content=goodbye_msg)], "source_documents": []}
+
+    # ------------------------------------------------------------------
+    # 1️⃣  History snapshot (max 6 turns, 30‑word each)
+    # ------------------------------------------------------------------
+    MAX_TURNS = 6
+    recent = state["messages"][-MAX_TURNS:]
+    history_lines: List[str] = []
+    pending_questions = []
+    for m in recent:
+        prefix = "User:" if isinstance(m, HumanMessage) else "AI:"
+        if isinstance(m, AIMessage) and "?" in (m.content if isinstance(m.content, str) else str(m.content)):
+            pending_questions.append(str(m.content).strip())
+        txt = " ".join(str(m.content).split()[:30])
+        history_lines.append(f"{prefix} {txt}")
+    history_summary = "\n".join(history_lines)
+
+    # Trim pending questions to last few
+    pending_questions = pending_questions[-3:]
+
+    # Check self‑harm against a single string (combined recent history + latest user text)
+    combined_check_text = history_summary
+    if state.get("user_text"):
+        combined_check_text = f"{history_summary}\nUser: {state['user_text']}"
+
+    if detect_self_harm(combined_check_text):
+        logger.warning("Self‑harm detected – returning crisis script.")
+        return {"messages": [AIMessage(content=CRISIS_RESPONSE)], "source_documents": []}
+
+    # ------------------------------------------------------------------
+    # 2️⃣  Emotion tip (optional)
+    # ------------------------------------------------------------------
+    scores: Dict[str, float] = state.get("emotion_scores", {})
+    if scores:
+        # safest way – use items() → guarantees the key‑func returns a float
+        top_emotion = max(scores.items(), key=lambda item: item[1])[0]  # type: ignore[arg-type]
+        tip = EMOTION_TIPS.get(top_emotion, "")
     else:
-        full_prompt += " Respond naturally (80-120 words): validate, reflect, and ask one question."
+        tip = ""
 
-    logger.debug(f"LLM Prompt (truncated): {full_prompt[:200]}...")
+    # ------------------------------------------------------------------
+    # 3️⃣  Retrieve the *best* empathy template from the FAISS store
+    # ------------------------------------------------------------------
+    template_doc: Optional[Document] = None
+    source_documents: List[Document] = []       # will be returned for logging / UI
+
+    sentiment = state.get("sentiment", "negative")
+    category = state.get("category", None) if sentiment != "positive" else None
+    is_positive = sentiment == "positive"
+
+    vs = positive_vectorstore if is_positive else vectorstore
+    if vs is not None:
+        try:
+            # ‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑‑
+            # Create a retriever that returns the top‑k most similar docs.
+            # We ask for a few candidates (k=5) so we can optionally filter by category.
+
+            retriever = cast(Any, vs.as_retriever(search_kwargs={"k": 5}))
+            candidate_docs = retriever.invoke(state["user_text"])
+
+            # For positive sentiment, skip category filtering to use any positive template.
+            # For negative/default, filter by topic category.
+            if is_positive:
+                final_candidates = candidate_docs
+            else:
+                cat = (category or "").lower()
+                filtered = [
+                    d for d in candidate_docs
+                    if cat in d.metadata.get("category", "").lower()
+                ]
+                final_candidates = filtered if filtered else candidate_docs
+            logger.info(f"Positive retrieval: {len(candidate_docs)} candidates found for query '{state['user_text'][:50]}...' from {sentiment} vectorstore")
+            # Take the very best match (first element after sorting by similarity).
+            if final_candidates:
+                template_doc = final_candidates[0]          # type: ignore[assignment]       # keep for citation / UI
+                source_documents = final_candidates  # Optional: for logging/UI
+                logger.info(f"Top candidate ID: {final_candidates[0].metadata.get('id')}")
+        except Exception as e:
+            logger.warning(f"RAG retrieval failed: {e}")
+
+    # ------------------------------------------------------------------
+    # 4️⃣  If we have a template, **adapt** it with the LLM.
+    # ------------------------------------------------------------------
+    if template_doc is not None:
+        # ------------------------------------------------------------------
+        #   Pull the three raw template strings from metadata.
+        # ------------------------------------------------------------------
+        base_empathic_q   = template_doc.metadata.get("empathic_question", "")
+        base_empathic_rsp = template_doc.metadata.get("empathic_response", "")
+        base_next_q       = template_doc.metadata.get("next_question", "")
+        sys_prompt = template_doc.metadata.get("system_prompt", SYSTEM_PROMPT)
+
+        # ------------------------------------------------------------------
+        #   Build the adaptation prompt.
+        # ------------------------------------------------------------------
+        adapt_prompt = _build_adapt_prompt(
+            sys_prompt=sys_prompt,
+            history_summary=history_summary,
+            user_text=state["user_text"],
+            base_empathic_q=base_empathic_q,
+            base_empathic_rsp=base_empathic_rsp,
+            base_next_q=base_next_q,
+            pending_questions=pending_questions,
+        )
+
+        # ------------------------------------------------------------------
+        #   Call the model and parse the JSON.
+        # ------------------------------------------------------------------
+        adapt_parser = JsonOutputParser(pydantic_object=AdaptedEmpathy)
+
+        try:
+            # The LLM returns an `AIMessage` (or sometimes a raw string).
+            raw_msg = ChatOpenAI(model="gpt-4o-mini", temperature=0.7).invoke(
+                [SystemMessage(content=sys_prompt), HumanMessage(content=adapt_prompt)]
+            )
+
+            # ------------------------------------------------------------------
+            #   Normalise the content to a plain string before feeding the parser.
+            # ------------------------------------------------------------------
+            if isinstance(raw_msg, AIMessage):
+                content_obj = raw_msg.content
+            else:
+                content_obj = getattr(raw_msg, "content", raw_msg)   # fallback
+
+            # The content may be a list of strings – join them.
+            if isinstance(content_obj, list):
+                content_str = "\n".join(str(p) for p in content_obj)
+            else:
+                content_str = str(content_obj)
+
+            # Parse the JSON into a dict, then build the Pydantic model.
+            parsed_dict = adapt_parser.parse(content_str)          # type: ignore[arg-type]
+            adapted = AdaptedEmpathy(**parsed_dict)
+
+            # ------------------------------------------------------------------
+            #   Build the final answer that will be sent back to the user.
+            # ------------------------------------------------------------------
+            final_text = f"{adapted.adapted_response}\n\n{adapted.adapted_next_question}"
+            # Optional citation line – mirrors the `ask_bot()` helper you showed.
+            src_id = template_doc.metadata.get("id", "unknown")
+            final_text = f"{final_text}\n\nSource: [{src_id}]"
+
+        except Exception as exc:
+            # ------------------------------------------------------------------
+            #   Anything that goes wrong in the adaptation path falls back
+            #   to a generic, safe reply (so the user never sees a crash).
+            # ------------------------------------------------------------------
+            logger.exception(f"Template adaptation failed: {exc}")
+            final_text = (
+                "I’m hearing you. It sounds like you’re feeling something important. "
+                "Could you tell me a little more about what’s on your mind?"
+            )
+            source_documents = []   # no reliable source to cite
+
+        # ------------------------------------------------------------------
+        #   Return the adapted answer (and the doc we used as a source).
+        # ------------------------------------------------------------------
+        return {"messages": [AIMessage(content=final_text)], "source_documents": source_documents, "pending_questions": pending_questions}
+
+    # ------------------------------------------------------------------
+    # 5️⃣  **Fallback** – no matching template or retrieval failed.
+    # ------------------------------------------------------------------
+    logger.info("No empathy template found – falling back to the generic response chain.")
+
+    # ---- Re‑use the generic USER_PROMPT you already have in the file ----
+    # (You may still want to include the emotion tip, guideline, etc.)
+    max_q_per_cat = state["max_questions"]
+    cat_q_cnt = state.get("category_questions_count", 0)
+    progress_pct = min(100, int((cat_q_cnt / max_q_per_cat) * 100) if max_q_per_cat else 0)
+
+    # Re‑compute the tip (we already have it, but keep the logic self‑contained)
+    scores: Dict[str, float] = state.get("emotion_scores", {})
+    if scores:
+        top_emotion = max(scores.items(), key=lambda item: item[1])[0]   # type: ignore[arg-type]
+        tip = EMOTION_TIPS.get(top_emotion, "")
+    else:
+        tip = ""
+
+    # Build the generic user prompt (identical to the one you used before)
+    user_prompt = USER_PROMPT.format(
+        max_turns=MAX_TURNS,
+        history_summary=history_summary,
+        user_text=state["user_text"],
+        category=state.get("category", "emotional_functioning"),
+        progress_pct=progress_pct,
+        cat_q_cnt=cat_q_cnt,
+        max_q_per_cat=max_q_per_cat,
+        emotion_tip=tip,
+        guideline=state.get("guideline", ""),
+        probe_instruction=(
+            "" if progress_pct > 5
+            else "Do NOT draw any conclusions about the child's mental state yet; focus only on listening and validating."
+        ),
+        switch_instruction=(
+            "" if cat_q_cnt < max_q_per_cat
+            else "Ask the user whether they would like to elaborate more on this topic, switch to a related topic, or continue the current conversation."
+        ),
+    )
+
+    # Generic chain that returns a ZenarkResponse (your original JSON schema)
+    generic_chain = (ChatOpenAI(model="gpt-4o-mini", temperature=0.7) | response_parser)
 
     try:
-        response_msg = llm.invoke([HumanMessage(content=full_prompt)])
-        response = response_msg.content
-        logger.debug(f"Raw LLM response: {response[:100]}...")
-    except Exception as e:
-        logger.exception(f"LLM error: {e}")
-        response = "I'm here to listen if you'd like to share more."
+        raw = generic_chain.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_prompt)])
+        if isinstance(raw, ZenarkResponse):
+            result = raw
+        elif isinstance(raw, dict):
+            result = ZenarkResponse(**raw)
+        else:
+            # raw is an AIMessage – parse its content with the same JSON parser
+            result = ZenarkResponse(**response_parser.parse(raw.content))
+        final_text = f"{result.validation} {result.reflection} {result.question}"
+    except Exception as exc:
+        logger.exception(f"Generic LLM failed: {exc}")
+        final_text = "I’m here to listen. Could you tell me more about how you’re feeling?"
 
-    if isinstance(response, list):
-        # Join list elements into a single string if needed
-        response = " ".join(str(item) for item in response)
-    response = response.strip()
-    if len(response) < 20 or "don't know" in response.lower():
-        logger.warning("Regenerating poor response.")
-        regen_prompt = f"Empathize with '{state['user_text']}' ({category}). Validate and ask follow-up, inspired by RAG: {rag_context[:200]}."
-        if category_questions_count % max_q == 0 and category_questions_count > 0:
-            regen_prompt += f" Ask about continuing this topic or switching to {suggested_next}."
-        response_msg = llm.invoke([HumanMessage(content=regen_prompt)])
-        response = response_msg.content
-        if isinstance(response, list):
-            response = " ".join(str(item) for item in response)
-        response = response.strip()
+    # No source document for the generic path – return an empty list.
+    return {"messages": [AIMessage(content=final_text)], "source_documents": [], "pending_questions": pending_questions}
 
-    return {"messages": [AIMessage(content=response)]}
+def positive_craft_response(state: GraphState) -> Dict[str, Any]:
+    """
+    Specialized craft node for positive sentiment: skips category, suicide, etc.
+    Directly retrieves from positive store and adapts.
+    """
+    # Reuse much of craft_response_node logic, but simplified
+    MAX_TURNS = 6
+    recent = state["messages"][-MAX_TURNS:]
+    history_lines: List[str] = []
+    pending_questions = []
+    for m in recent:
+        prefix = "User:" if isinstance(m, HumanMessage) else "AI:"
+        if isinstance(m, AIMessage) and "?" in (m.content if isinstance(m.content, str) else str(m.content)):
+            pending_questions.append(str(m.content).strip())
+        txt = " ".join(str(m.content).split()[:30])
+        history_lines.append(f"{prefix} {txt}")
+    history_summary = "\n".join(history_lines)
+    pending_questions = pending_questions[-3:]
+
+    # Safety checks (moral risk, end intent)
+    if detect_moral_risk(state["user_text"]):
+        safe_text = (
+            "I hear that you’re feeling really upset right now. "
+            "Wanting to hurt someone isn’t okay – you’re a kind person and there are better ways to deal with those feelings. "
+            "Can you tell me what’s making you feel this way, or would you like to talk about a safer way to handle the situation?"
+        )
+        logger.info("Moral‑risk detected → safe reply.")
+        return {"messages": [AIMessage(content=safe_text)], "source_documents": []}
+
+    if detect_end_intent(state["user_text"]):
+        goodbye_msg = (
+            "It’s been wonderful chatting with you! You’re doing great, and remember you can always stay positive. "
+            f"{ZEN_MODE_SUGGESTION} Take care and see you next time!"
+        )
+        logger.info("End‑intent detected → goodbye.")
+        return {"messages": [AIMessage(content=goodbye_msg)], "source_documents": []}
+
+    template_doc: Optional[Document] = None
+    source_documents: List[Document] = []
+
+    if positive_vectorstore is not None:
+        try:
+            retriever = cast(Any, positive_vectorstore.as_retriever(search_kwargs={"k": 5}))
+            candidate_docs = retriever.invoke(state["user_text"])
+            final_candidates = candidate_docs  # No filtering for positive
+            logger.info(f"Positive retrieval: {len(candidate_docs)} candidates found for query '{state['user_text'][:50]}...' from positive vectorstore")
+            if final_candidates:
+                template_doc = final_candidates[0]
+                source_documents = final_candidates
+                logger.info(f"Top positive candidate ID: {final_candidates[0].metadata.get('id')}")
+        except Exception as e:
+            logger.warning(f"Positive RAG retrieval failed: {e}")
+
+    if template_doc is not None:
+        base_empathic_q   = template_doc.metadata.get("empathic_question", "")
+        base_empathic_rsp = template_doc.metadata.get("empathic_response", "")
+        base_next_q       = template_doc.metadata.get("next_question", "")
+        sys_prompt = template_doc.metadata.get("system_prompt", SYSTEM_PROMPT)
+
+        adapt_prompt = _build_adapt_prompt(
+            sys_prompt=sys_prompt,
+            history_summary=history_summary,
+            user_text=state["user_text"],
+            base_empathic_q=base_empathic_q,
+            base_empathic_rsp=base_empathic_rsp,
+            base_next_q=base_next_q,
+            pending_questions=pending_questions,
+        )
+
+        adapt_parser = JsonOutputParser(pydantic_object=AdaptedEmpathy)
+
+        try:
+            raw_msg = ChatOpenAI(model="gpt-4o-mini", temperature=0.1).invoke(  # Lower temp for reliability
+                [SystemMessage(content=sys_prompt), HumanMessage(content=adapt_prompt)]
+            )
+
+            if isinstance(raw_msg, AIMessage):
+                content_obj = raw_msg.content
+            else:
+                content_obj = getattr(raw_msg, "content", raw_msg)
+
+            if isinstance(content_obj, list):
+                content_str = "\n".join(str(p) for p in content_obj)
+            else:
+                content_str = str(content_obj)
+
+            logger.debug(f"Raw LLM response: {content_str[:300]}...")  # Increased for better debug
+
+            # Regex to extract first JSON object (robust against wrappers like "Here is the JSON: {...}")
+            import re
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content_str, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                try:
+                    parsed = json.loads(json_str)
+                except json.JSONDecodeError:
+                    parsed = None
+            else:
+                parsed = None
+
+            if isinstance(parsed, dict):
+                # Check for schema indicators (expanded)
+                schema_indicators = {'properties', 'required', 'title', '$defs', 'additionalProperties'}
+                if any(key in parsed for key in schema_indicators) or 'description' in parsed.get('', {}):
+                    logger.warning("LLM returned schema; falling back.")
+                    raise ValueError("LLM returned schema instead of data")
+                
+                if "adapted_response" in parsed and "adapted_next_question" in parsed:
+                    parsed_dict = parsed
+                else:
+                    # Let parser try the extracted JSON
+                    parsed_dict = adapt_parser.parse(json_str)
+            else:
+                # Fallback to full content_str
+                parsed_dict = adapt_parser.parse(content_str)
+
+            # Final validation before Pydantic
+            if not isinstance(parsed_dict, dict) or "adapted_response" not in parsed_dict or "adapted_next_question" not in parsed_dict:
+                raise ValueError(f"Invalid response format after parsing: {type(parsed_dict)} - keys: {list(parsed_dict.keys()) if isinstance(parsed_dict, dict) else 'N/A'}")
+
+            adapted = AdaptedEmpathy(**parsed_dict)
+
+            final_text = f"{adapted.adapted_response}\n\n{adapted.adapted_next_question}"
+            src_id = template_doc.metadata.get("id", "unknown")
+            final_text = f"{final_text}\n\nSource: [{src_id}]"
+
+        except Exception as exc:
+            logger.exception(f"Positive template adaptation failed: {exc}")
+            # Enhanced fallback with sentiment-aware response
+            final_text = (
+                "That's wonderful to hear—I'm glad things feel positive for you right now. "
+                "What’s one small thing that’s bringing you joy today?"
+            )
+            source_documents = []
+
+        return {"messages": [AIMessage(content=final_text)], "source_documents": source_documents, "pending_questions": pending_questions}
+
+    # Fallback for positive
+    logger.info("No positive empathy template found – falling back to generic positive response.")
+    final_text = "Sounds like a great day! I'm happy for you. What's one thing you're looking forward to next?"
+    return {"messages": [AIMessage(content=final_text)], "source_documents": [], "pending_questions": pending_questions}
+
+       
+
 
 # Build the graph
 workflow = StateGraph(GraphState)
+workflow.add_node("sentiment", sentiment_node)
+workflow.add_node("suicide_check", suicide_check_node)
 workflow.add_node("classify_category", classify_category)
 workflow.add_node("score_emotion", score_emotion_node)
 workflow.add_node("fetch_marks", fetch_marks_node)
 workflow.add_node("retrieve_rag", retrieve_rag_node)
 workflow.add_node("get_guideline", get_guideline_node)
 workflow.add_node("craft_response", craft_response_node)
+workflow.add_node("positive_craft_response", positive_craft_response)
 
-workflow.set_entry_point("classify_category")
+workflow.set_entry_point("sentiment")
+workflow.add_conditional_edges(
+    "sentiment",
+    lambda state: state["sentiment"],
+    {"positive": "positive_craft_response", "negative": "suicide_check", "neutral": "suicide_check"}  # Neutral treated as negative for safety
+)
+workflow.add_conditional_edges(
+    "suicide_check",
+    lambda state: END if state.get("is_crisis", False) else "classify_category",
+    {END: END, "classify_category": "classify_category"}
+)
 workflow.add_edge("classify_category", "score_emotion")
 workflow.add_conditional_edges(
     "score_emotion",
@@ -571,6 +1191,7 @@ workflow.add_edge("fetch_marks", "retrieve_rag")
 workflow.add_edge("retrieve_rag", "get_guideline")
 workflow.add_edge("get_guideline", "craft_response")
 workflow.add_edge("craft_response", END)
+workflow.add_edge("positive_craft_response", END)
 
 graph_app = workflow.compile()
 logger.info("LangGraph workflow compiled successfully.")
@@ -633,6 +1254,9 @@ def generate_response(user_text: str, name: Optional[str] = None, question_index
         "marks": None,
         "rag_context": "",
         "guideline": "",
+        "sentiment": None,
+        "is_crisis": False,
+        "pending_questions": [],
     }
 
     start_invoke = datetime.datetime.now()
@@ -643,8 +1267,8 @@ def generate_response(user_text: str, name: Optional[str] = None, question_index
     history.messages = result["messages"]
 
     response = result["messages"][-1].content
-    category = result["category"]
-    cat_count = result["category_questions_count"]
+    category = result.get("category", "unknown")
+    cat_count = result.get("category_questions_count", 0)
     progress = min(100, int((cat_count / max_questions) * 100))
     elapsed = (datetime.datetime.now() - start_time).total_seconds()
     logger.info(f"Response generated | category={category} | cat_count={cat_count} | progress={progress}% | invoke_time={elapsed_invoke:.2f}s | total_time={elapsed:.2f}s | len={len(response)} chars")
@@ -688,92 +1312,101 @@ def save_conversation(conversation, user_name: Optional[str], session_id: str = 
     return convert_objectid(record)  # Safe for JSON
 
 
-# ============================================================
-#  SCHEMAS
-# ============================================================
-class ChatRequest(BaseModel):
-    text: str
-    name: Optional[str] = None
-    question_index: int = 1
-    max_questions: int = 5  # Updated default to 5
-    session_id: str = "default"  # New: for per-session memory
+def generate_report(name: str):
+    record = db["chat_sessions"].find_one({"name": name}, sort=[("_id", -1)])
+    if not record:
+        return {"error": f"No conversation found for {name}"}
+    conv_text = "\n".join(f"User: {t.get('user','')}\nAI: {t.get('ai','')}" for t in record.get("conversation", []))
+    report_data = generate_autogen_report(conv_text, name)
+    reports_col.insert_one(report_data)
+    return report_data
 
-class SaveRequest(BaseModel):
-    conversation: List[Dict]
-    name: Optional[str] = None
-    session_id: str = "default"
+# # ============================================================
+# #  SCHEMAS
+# # ============================================================
+# class ChatRequest(BaseModel):
+#     text: str
+#     name: Optional[str] = None
+#     question_index: int = 1
+#     max_questions: int = 5  # Updated default to 5
+#     session_id: str = "default"  # New: for per-session memory
+
+# class SaveRequest(BaseModel):
+#     conversation: List[Dict]
+#     name: Optional[str] = None
+#     session_id: str = "default"
 
 
-class ReportRequest(BaseModel):
-    name: str
+# class ReportRequest(BaseModel):
+#     name: str
 
 
 # ============================================================
 #  MIDDLEWARE & ENDPOINTS
 # ============================================================
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start = datetime.datetime.now()
-    logger.info(f"Request start | {request.method} {request.url.path}")
-    try:
-        response = await call_next(request)
-    except Exception as e:
-        logger.exception(f"Unhandled error during {request.url.path}: {e}")
-        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
-    duration = (datetime.datetime.now() - start).total_seconds()
-    logger.info(f"Request end | {request.method} {request.url.path} | {duration:.2f}s | Status={response.status_code}")
-    return response
+# @app.middleware("http")
+# async def log_requests(request: Request, call_next):
+#     start = datetime.datetime.now()
+#     logger.info(f"Request start | {request.method} {request.url.path}")
+#     try:
+#         response = await call_next(request)
+#     except Exception as e:
+#         logger.exception(f"Unhandled error during {request.url.path}: {e}")
+#         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+#     duration = (datetime.datetime.now() - start).total_seconds()
+#     logger.info(f"Request end | {request.method} {request.url.path} | {duration:.2f}s | Status={response.status_code}")
+#     return response
 
-@app.get("/health")
-def health_check():
-    logger.info("Health check pinged.")
-    return {"status": "ok", "time": datetime.datetime.now().isoformat()}
+# @app.get("/health")
+# def health_check():
+#     logger.info("Health check pinged.")
+#     return {"status": "ok", "time": datetime.datetime.now().isoformat()}
 
-@app.post("/chat")
-def chat_endpoint(req: ChatRequest):
-    safe_name = req.name or "Unknown"  # Handle None for logging
-    response = generate_response(req.text, req.name, req.question_index, req.max_questions, req.session_id)
-    logger.info(f"Chat response returned to user={safe_name} | session={req.session_id}")
-    return {"response": response}
+# @app.post("/chat")
+# def chat_endpoint(req: ChatRequest):
+#     safe_name = req.name or "Unknown"  # Handle None for logging
+#     response = generate_response(req.text, req.name, req.question_index, req.max_questions, req.session_id)
+#     logger.info(f"Chat response returned to user={safe_name} | session={req.session_id}")
+#     return {"response": response}
 
-@app.post("/save_chat")
-def save_chat_endpoint(req: SaveRequest):
-    record = save_conversation(req.conversation, req.name, req.session_id)
-    return JSONResponse(content=jsonable_encoder(record))
+# @app.post("/save_chat")
+# def save_chat_endpoint(req: SaveRequest):
+#     record = save_conversation(req.conversation, req.name, req.session_id)
+#     return JSONResponse(content=jsonable_encoder(record))
 
 
-@app.post("/generate_report")
-def generate_report_endpoint(req: ReportRequest):
-    """Generate and store a multi-agent reflective report from user's latest conversation."""
-    try:
-        record = db["chat_sessions"].find_one({"name": req.name}, sort=[("_id", -1)])
-        if not record or "conversation" not in record:
-            return JSONResponse(status_code=404, content={"error": f"No conversation found for {req.name}"})
+# @app.post("/generate_report")
+# def generate_report_endpoint(req: ReportRequest):
+#     """Generate and store a multi-agent reflective report from user's latest conversation."""
+#     try:
+#         record = db["chat_sessions"].find_one({"name": req.name}, sort=[("_id", -1)])
+#         if not record or "conversation" not in record:
+#             return JSONResponse(status_code=404, content={"error": f"No conversation found for {req.name}"})
 
-        conv_text = []
-        for t in record["conversation"]:
-            user_msg = t.get("user", "")
-            ai_msg = t.get("ai", "")
-            if user_msg or ai_msg:
-                conv_text.append(f"User: {user_msg}\nAI: {ai_msg}")
-        conv_text = "\n".join(conv_text)
+#         conv_text = []
+#         for t in record["conversation"]:
+#             user_msg = t.get("user", "")
+#             ai_msg = t.get("ai", "")
+#             if user_msg or ai_msg:
+#                 conv_text.append(f"User: {user_msg}\nAI: {ai_msg}")
+#         conv_text = "\n".join(conv_text)
 
-        report_data = generate_autogen_report(conv_text, req.name)
-        insert_result = reports_col.insert_one(report_data)
-        report_data["_id"] = insert_result.inserted_id
+#         report_data = generate_autogen_report(conv_text, req.name)
+#         insert_result = reports_col.insert_one(report_data)
+#         report_data["_id"] = insert_result.inserted_id
 
-        # Convert ObjectId -> str before returning
-        safe_report = convert_objectid(report_data)
-        return JSONResponse(content=safe_report)
+#         # Convert ObjectId -> str before returning
+#         safe_report = convert_objectid(report_data)
+#         return JSONResponse(content=safe_report)
 
-    except Exception as e:
-        logger.exception(f"Report generation failed: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+#     except Exception as e:
+#         logger.exception(f"Report generation failed: {e}")
+#         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ============================================================
 #  MAIN ENTRYPOINT
 # ============================================================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True, log_config=None)
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True, log_config=None)
