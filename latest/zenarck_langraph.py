@@ -1,4 +1,8 @@
-# app.py
+# Zenark Mental Health AI Assistant
+# This program creates an empathetic AI counselor that can understand emotions,
+# provide supportive responses, and maintain helpful conversations with users.
+
+# Import necessary tools and libraries
 import os, re, json, torch, datetime, logging, numpy as np
 from typing import Annotated, Optional, List, Dict, Any, cast, TypedDict
 # from fastapi import FastAPI, Request
@@ -45,7 +49,10 @@ from prompt import SYSTEM_PROMPT, USER_PROMPT, EMOTION_TIPS,detect_end_intent,de
 # )
 
 # ============================================================
-#  LOGGING CONFIGURATION (Unchanged)
+#  System Logging Setup
+#  This section sets up detailed record-keeping of the AI's activities,
+#  helping us track conversations and ensure everything works properly.
+#  Think of it like the AI's diary where it writes down what it does.
 # ============================================================
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -74,7 +81,10 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 # ============================================================
-#  ENVIRONMENT + INITIALIZATION (Unchanged)
+#  System Startup and Configuration
+#  Here we set up all the basic settings the AI needs to work,
+#  like loading security keys and making sure everything is ready to go.
+#  It's like preparing all the tools before starting a conversation.
 # ============================================================
 load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -85,7 +95,12 @@ logger.info("Server startup initiated.")
 logger.info(f"Environment loaded. HF_TOKEN={'set' if HF_TOKEN else 'missing'} | MONGO_URI={'set' if MONGO_URI else 'missing'}")
 
 # ============================================================
-#  DATABASE CONNECTION (Unchanged)
+#  Database Setup - The AI's Memory System
+#  This connects to our database where we store:
+#  - Conversation histories (like a counseling session record)
+#  - Student information (like academic records)
+#  - Generated reports (summaries of conversations)
+#  Think of it as the filing cabinet where we keep all important records.
 # ============================================================
 try:
     client = MongoClient(MONGO_URI)
@@ -99,7 +114,14 @@ except Exception as e:
     raise
 
 # ============================================================
-#  HUGGINGFACE LOGIN & MODEL LOADING (Unchanged)
+#  AI Brain Loading - Emotional Understanding Components
+#  Here we load specialized AI models that help our system:
+#  - Understand emotions in text (like detecting if someone is happy or sad)
+#  - Analyze the overall mood of messages (positive or negative)
+#  - Process language in a human-like way
+#  
+#  These are like different parts of the AI's brain, each helping it
+#  understand and respond to users in a more human and empathetic way.
 # ============================================================
 if HF_TOKEN:
     try:
@@ -131,7 +153,10 @@ except Exception as e:
     raise
 
 # ------------------------------------------------------------------
-# 1️⃣  Metadata collector (updated to include extra fields from positive.json)
+# Knowledge Base Setup
+# This section helps the AI learn from example conversations and responses.
+# It's like giving the AI a handbook of good counseling practices, showing
+# it how to respond empathetically in different situations.
 # ------------------------------------------------------------------
 
 # --------------------------------------------------------------
@@ -139,11 +164,17 @@ except Exception as e:
 # --------------------------------------------------------------
 def metadata_func(record: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extract the fields we will need later and store them in the Document
-    metadata.  The loader will keep the *raw record* as page_content (a JSON
-    string) because we set `text_content=False`.  We only need the three
-    empathy fields for the vector store, so we also copy them into metadata.
-    Updated to include patient_context and psychiatrist_response for positive.json.
+    This function organizes information from our counseling examples database.
+    It's like creating index cards for each conversation example, noting:
+    - What type of situation it is (category)
+    - How a counselor should approach it (system guidance)
+    - What the person said (patient context)
+    - How the counselor responded (psychiatrist response)
+    - What questions were asked (empathic questions)
+    - How empathy was shown (empathic response)
+    - How to continue the conversation (next question)
+    
+    This helps the AI quickly find relevant examples when talking to users.
     """
     metadata.update({
         "id":                record.get("id"),
@@ -160,9 +191,16 @@ def metadata_func(record: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str,
 
 def embedding_content(record: Dict[str, Any]) -> str:
     """
-    Produce the short string that will be embedded.
-    We join the empathy fields with a pipe separator. Include patient_context and
-    psychiatrist_response if present (from positive.json) for richer embeddings.
+    This function combines different parts of a conversation example into one text.
+    It's like creating a summary that captures:
+    - What the person initially said
+    - How the counselor responded
+    - What questions were asked
+    - How empathy was shown
+    - What follow-up questions were used
+    
+    This summary helps the AI quickly find similar situations when talking to users.
+    It's like having a well-organized reference book of counseling experiences.
     """
     parts = [
         record.get("patient_context", ""),
@@ -653,7 +691,24 @@ def _build_adapt_prompt(
     base_next_q: str,
     pending_questions: Optional[List[str]] = None,
 ) -> str:
-    """Return the full prompt that asks the LLM to rewrite the three template fields."""
+    """
+    This function helps the AI personalize its responses for each user.
+    
+    It takes:
+    - The conversation history (what's been discussed)
+    - What the user just said
+    - Example responses from similar situations
+    - Questions that haven't been answered yet
+    
+    It's like a counselor reviewing their notes and similar cases before
+    responding, making sure to:
+    - Keep the response warm and understanding
+    - Show they remember what was discussed
+    - Ask relevant follow-up questions
+    - Address any topics that need more discussion
+    
+    This helps make each response feel personal and meaningful to the user.
+    """
     pending_str = "\n".join([f"- {q}" for q in (pending_questions or [])]) if pending_questions else ""
     pending_note = f"\n\nNote unanswered questions from history:\n{pending_str}" if pending_str else ""
     
@@ -1229,6 +1284,22 @@ def get_session_history(session_id: str) -> ChatMessageHistory:
 #  CORE RESPONSE LOGIC (LangGraph Integration)
 # ============================================================
 def generate_response(user_text: str, name: Optional[str] = None, question_index=1, max_questions=5, session_id: str = "default"):
+    """
+    This is the main function that creates responses to what users say.
+    
+    How it works:
+    1. Gets ready to respond (like a counselor preparing to listen)
+    2. Notes who it's talking to and keeps track of the conversation
+    3. Makes sure it remembers the discussion history
+    4. Creates a personalized, empathetic response
+    
+    It's designed to:
+    - Be supportive and understanding
+    - Remember previous conversations
+    - Ask helpful questions
+    - Keep track of how the conversation is going
+    - Notice if someone needs immediate help
+    """
     start_time = datetime.datetime.now()
     safe_name = name or "Unknown"
     logger.info(f"Generating response | user={safe_name} | session={session_id} | text='{user_text[:80]}'")
@@ -1275,6 +1346,21 @@ def generate_response(user_text: str, name: Optional[str] = None, question_index
     return response
 
 def save_conversation(conversation, user_name: Optional[str], session_id: str = "default"):
+    """
+    This function saves the complete conversation record, like keeping detailed
+    counseling session notes. For each conversation, it:
+    
+    1. Records what was said (by both user and AI)
+    2. Analyzes the emotions expressed
+    3. Stores everything safely in our database
+    4. Creates a backup file for extra safety
+    
+    This helps us:
+    - Keep track of each person's progress
+    - Review conversations to improve our responses
+    - Make sure we remember important details
+    - Generate helpful reports when needed
+    """
     logger.info(f"Saving conversation for user={user_name} | session={session_id}")
     analyzed_conversation = []
     for turn in conversation:
@@ -1313,6 +1399,24 @@ def save_conversation(conversation, user_name: Optional[str], session_id: str = 
 
 
 def generate_report(name: str):
+    """
+    This function creates a detailed summary report of someone's conversations with the AI.
+    
+    It works like this:
+    1. Finds the most recent conversation for the person
+    2. Reviews everything that was discussed
+    3. Creates a helpful summary that shows:
+       - Main topics discussed
+       - Emotional patterns noticed
+       - Progress made
+       - Areas that might need more attention
+    
+    This is like a counselor writing up session notes to:
+    - Track someone's progress over time
+    - Identify important themes or concerns
+    - Help plan future conversations
+    - Provide insights about what's helping most
+    """
     record = db["chat_sessions"].find_one({"name": name}, sort=[("_id", -1)])
     if not record:
         return {"error": f"No conversation found for {name}"}
